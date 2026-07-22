@@ -27,6 +27,7 @@ Env:      TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_IDS, [PULSE_CHAT_ID]
 
 import ast
 import base64
+import hmac
 import ipaddress
 import json
 import math
@@ -34,6 +35,7 @@ import mimetypes
 import os
 import re
 import socket
+import sys
 import threading
 import time
 import random
@@ -41,7 +43,7 @@ from datetime import datetime, date, timedelta
 from html.parser import HTMLParser
 from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import ollama
 import requests
@@ -63,7 +65,7 @@ SKILLS_DIR = "skills"
 
 PENDING_PULSE_FILE = "pulse_pending.json"
 DASHBOARD_HTML = "dashboard.html"
-WEB_CHAT_ID = 0   # web-chat conversation id (Telegram ids are positive)
+WEB_CHAT_FILE = "web_chat.json"
 
 # Tunables — defaults here, user overrides in config.json.
 DEFAULTS = {
@@ -79,6 +81,7 @@ DEFAULTS = {
     "dashboard_port": 8787,
     "workspace_dir": "workspace",
     "vision_model": "",
+    "dashboard_token": "",
 }
 
 
@@ -116,17 +119,26 @@ DASHBOARD_HOST = str(_cfg["dashboard_host"])
 DASHBOARD_PORT = int(_cfg["dashboard_port"])
 WORKSPACE_DIR = str(_cfg["workspace_dir"])
 VISION_MODEL = str(_cfg["vision_model"]).strip()
+DASHBOARD_TOKEN = str(_cfg["dashboard_token"]).strip()
 
-BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+# Telegram is OPTIONAL. With no token or no allowed IDs, the Barrel
+# runs local-only: the dashboard becomes the sole interface, and
+# scheduled tasks and reminders are delivered to its web chat.
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 ALLOWED_IDS = {int(x) for x in
-               os.environ.get("TELEGRAM_ALLOWED_IDS", "").split(",") if x}
-PULSE_CHAT_ID = int(os.environ.get("PULSE_CHAT_ID",
-                                   next(iter(ALLOWED_IDS), 0)))
+               os.environ.get("TELEGRAM_ALLOWED_IDS", "").split(",")
+               if x.strip().lstrip("-").isdigit()}
+TELEGRAM_ENABLED = bool(BOT_TOKEN and ALLOWED_IDS)
+WEB_CHAT_ID = 0   # web-chat conversation id (Telegram ids are nonzero)
+PULSE_CHAT_ID = int(os.environ.get(
+    "PULSE_CHAT_ID",
+    next(iter(ALLOWED_IDS), WEB_CHAT_ID) if TELEGRAM_ENABLED
+    else WEB_CHAT_ID))
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# Dashboard binds to localhost ONLY (config: dashboard_host) — it
-# displays private conversation content. To view from another device,
-# SSH-tunnel the port; don't bind wider.
+# Dashboard binds to localhost by default (config: dashboard_host) —
+# it displays private conversation content and has no login. Binding
+# anywhere else REQUIRES config "dashboard_token"; see dashboard_loop.
 OLLAMA_URL = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
 START_TIME = datetime.now()
 
@@ -752,11 +764,11 @@ def run_pulse(arg: str, chat_id: int) -> str:
         log_event("pulse_proposed", name=name, cron=cron,
                   prompt=prompt[:200])
         try:
-            send_message(PULSE_CHAT_ID,
-                         f"\U0001f552 Proposed pulse task '{name}' "
-                         f"({cron}):\n{prompt}\n\nSend /approve "
-                         f"{name} to enable or /reject {name} to "
-                         f"discard.")
+            deliver(PULSE_CHAT_ID,
+                    f"\U0001f552 Proposed pulse task '{name}' "
+                    f"({cron}):\n{prompt}\n\nSend /approve "
+                    f"{name} to enable or /reject {name} to "
+                    f"discard.", "pulse")
         except Exception as e:
             print(f"pulse proposal notify failed: {e!r}")
         return (f"(proposed '{name}' — it is NOT active yet. The user "
@@ -942,6 +954,13 @@ REMEMBER_RE = re.compile(r"<remember>(.*?)</remember>", re.DOTALL)
 def build_protocol() -> str:
     tool_lines = "\n".join(f"- {name}: {t['desc']}"
                            for name, t in TOOLS.items())
+    style_note = (
+        "You are chatting over Telegram on a phone. Keep replies "
+        "short. Plain text only — no markdown headers or tables."
+        if TELEGRAM_ENABLED else
+        "You are chatting in a local web panel in a desktop browser. "
+        "Keep replies reasonably concise. Plain text — no markdown "
+        "headers or tables; URLs you write are clickable.")
     vision_note = (
         "You cannot see images directly. When the user sends a "
         "photo, a separate vision model's description is injected "
@@ -979,8 +998,7 @@ routines firing, not the user. Do the task, then send what's worth
 sending. If nothing is worth sending, reply exactly PULSE_OK.
 
 ## Style
-You are chatting over Telegram on a phone. Keep replies short.
-Plain text only — no markdown headers or tables.
+{style_note}
 """
 
 
@@ -1169,7 +1187,8 @@ def fire_due_reminders() -> None:
     keep = []
     for r in reminders:
         if datetime.fromisoformat(r["due"]) <= now:
-            send_message(r["chat_id"], f"⏰ Reminder: {r['message']}")
+            deliver(r["chat_id"], f"⏰ Reminder: {r['message']}",
+                    "reminder")
             log_event("reminder_fired", **r)
         else:
             keep.append(r)
@@ -1185,7 +1204,7 @@ def fire_task(task: dict, state: dict, now: datetime) -> None:
     try:
         reply = handle_turn(PULSE_CHAT_ID, prompt, kind="pulse")
         if reply.strip() != "PULSE_OK":
-            send_message(PULSE_CHAT_ID, reply)
+            deliver(PULSE_CHAT_ID, reply, "pulse")
     except Exception as e:
         print(f"pulse: '{task['name']}' failed: {e}")
     state[task["name"]] = now.isoformat()
@@ -1285,28 +1304,70 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # keep service.log quiet
         pass
 
-    def _send(self, body: bytes, ctype: str, code: int = 200) -> None:
+    def _send(self, body: bytes, ctype: str, code: int = 200,
+              extra: dict = None) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
+    def _cookie_token(self) -> str:
+        for part in self.headers.get("Cookie", "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "barrel_token":
+                return v
+        return ""
+
+    def _authed(self, qs: dict) -> bool:
+        """No token configured means loopback-only, which dashboard_loop
+        already enforces — nothing to check. With a token, accept it
+        from ?token= (then set a cookie) or from that cookie."""
+        if not DASHBOARD_TOKEN:
+            return True
+        supplied = qs.get("token", [""])[0] or self._cookie_token()
+        return hmac.compare_digest(supplied, DASHBOARD_TOKEN)
+
     def do_GET(self):
-        if self.path == "/status.json":
+        parsed = urlparse(self.path)
+        path, qs = parsed.path, parse_qs(parsed.query)
+        if not self._authed(qs):
+            self._send(b"Unauthorized. Open this page with "
+                       b"?token=YOUR_TOKEN", "text/plain", 401)
+            return
+        extra = ({"Set-Cookie": f"barrel_token={DASHBOARD_TOKEN}; "
+                                f"Path=/; SameSite=Strict; "
+                                f"Max-Age=31536000"}
+                 if DASHBOARD_TOKEN and qs.get("token") else None)
+        if path == "/messages":
+            try:
+                since = int(qs.get("since", ["0"])[0])
+            except ValueError:
+                since = 0
+            with _web_lock:
+                msgs = [m for m in web_outbox if m["id"] > since]
+                last = web_outbox[-1]["id"] if web_outbox else 0
+            self._send(json.dumps({"messages": msgs,
+                                   "last_id": last}).encode(),
+                       "application/json", 200, extra)
+            return
+        if path == "/status.json":
             self._send(json.dumps(gather_status(), indent=2).encode(),
-                       "application/json")
-        elif self.path == "/":
+                       "application/json", 200, extra)
+        elif path == "/":
             # Served from disk every request — edit dashboard.html and
             # refresh the browser; no bot restart needed.
             page = read_file(DASHBOARD_HTML,
                              "<h1>dashboard.html not found next to "
                              "the script</h1>")
-            self._send(page.encode(), "text/html; charset=utf-8")
-        elif self.path.startswith("/workspace/"):
+            self._send(page.encode(), "text/html; charset=utf-8",
+                       200, extra)
+        elif path.startswith("/workspace/"):
             # Same containment as the file skill: _workspace_path
             # refuses anything that escapes workspace/.
-            name = unquote(self.path[len("/workspace/"):])
+            name = unquote(path[len("/workspace/"):])
             wpath = _workspace_path(name)
             if not wpath or not os.path.isfile(wpath):
                 self._send(b"not found", "text/plain", 404)
@@ -1346,17 +1407,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
                        "application/json", 400)
             return
         log_event("web_photo", size=len(img), caption=caption[:200])
+        label = f"[image] {caption}" if caption else "[image]"
         try:
             reply = image_turn(img, caption, WEB_CHAT_ID, "web")
         except Exception as e:
             log_event("web_photo_error", error=repr(e))
+            web_post("me", label)
             self._send(json.dumps({"error": repr(e)}).encode(),
                        "application/json", 500)
             return
-        self._send(json.dumps({"reply": reply}).encode(),
+        web_post("me", label)
+        last_id = web_post("bot", reply)
+        self._send(json.dumps({"reply": reply,
+                               "last_id": last_id}).encode(),
                    "application/json")
 
     def do_POST(self):
+        if not self._authed(parse_qs(urlparse(self.path).query)):
+            self._send(b'{"error": "unauthorized"}',
+                       "application/json", 401)
+            return
         if self.path == "/chat-image":
             self._chat_image()
             return
@@ -1384,16 +1454,45 @@ class DashboardHandler(BaseHTTPRequestHandler):
                      else handle_turn(WEB_CHAT_ID, message, kind="web"))
         except Exception as e:
             log_event("web_chat_error", error=repr(e))
+            web_post("me", message)
             self._send(json.dumps({"error": repr(e)}).encode(),
                        "application/json", 500)
             return
-        self._send(json.dumps({"reply": reply}).encode(),
+        # Both halves are recorded only now, after the turn completes.
+        # Recording the user's message up front let the dashboard's
+        # poller see it mid-generation and draw it a second time.
+        web_post("me", message)
+        last_id = web_post("bot", reply)
+        self._send(json.dumps({"reply": reply,
+                               "last_id": last_id}).encode(),
                    "application/json")
+
+
+def _is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host.lower() in ("localhost", "")
+
+
+def dashboard_available() -> bool:
+    """The dashboard refuses to serve beyond loopback without a token:
+    it has no login and exposes conversations and file access."""
+    if not DASHBOARD_PORT:
+        return False
+    return _is_loopback(DASHBOARD_HOST) or bool(DASHBOARD_TOKEN)
 
 
 def dashboard_loop() -> None:
     if not DASHBOARD_PORT:
         print("dashboard: disabled (dashboard_port is 0)")
+        return
+    if not dashboard_available():
+        print(f"dashboard: REFUSING to bind {DASHBOARD_HOST} — the "
+              f"dashboard has no login and exposes your conversations "
+              f"and workspace. Set \"dashboard_token\" in config.json "
+              f"to allow this, or keep dashboard_host at 127.0.0.1 "
+              f"and SSH-tunnel instead.")
         return
     try:
         server = ThreadingHTTPServer((DASHBOARD_HOST, DASHBOARD_PORT),
@@ -1401,7 +1500,11 @@ def dashboard_loop() -> None:
     except OSError as e:
         print(f"dashboard: disabled ({e})")
         return
-    print(f"dashboard: http://{DASHBOARD_HOST}:{DASHBOARD_PORT}")
+    if DASHBOARD_TOKEN:
+        print(f"dashboard: http://{DASHBOARD_HOST}:{DASHBOARD_PORT}/"
+              f"?token={DASHBOARD_TOKEN}  (token required)")
+    else:
+        print(f"dashboard: http://{DASHBOARD_HOST}:{DASHBOARD_PORT}")
     server.serve_forever()
 
 # ======================================================= telegram frontend
@@ -1435,6 +1538,58 @@ def typing(chat_id: int):
 def send_message(chat_id: int, text: str) -> None:
     for i in range(0, len(text), 4000):
         tg("sendMessage", chat_id=chat_id, text=text[i:i + 4000])
+
+
+# ------------------------------------------------- web chat delivery
+
+web_outbox: list = []          # [{"id", "ts", "role", "kind", "text"}]
+_web_lock = threading.Lock()
+WEB_OUTBOX_MAX = 200
+
+
+def load_web_state() -> None:
+    """In local-only mode the dashboard is the ONLY record of a
+    conversation, so unlike Telegram chats it is persisted to disk."""
+    data = load_json(WEB_CHAT_FILE, {})
+    web_outbox[:] = data.get("outbox", [])[-WEB_OUTBOX_MAX:]
+    convo = data.get("convo", [])
+    if convo:
+        conversations[WEB_CHAT_ID] = convo[-MAX_TURNS:]
+
+
+def save_web_state() -> None:
+    try:
+        save_json(WEB_CHAT_FILE,
+                  {"outbox": web_outbox[-WEB_OUTBOX_MAX:],
+                   "convo": conversations.get(WEB_CHAT_ID,
+                                              [])[-MAX_TURNS:]})
+    except OSError as e:
+        print(f"web state save failed: {e}")
+
+
+def web_post(role: str, text: str, kind: str = "chat") -> int:
+    """Append to the web transcript. The dashboard polls /messages,
+    which is how proactive pulse and reminder output reaches a
+    browser that can't receive a push."""
+    with _web_lock:
+        msg_id = (web_outbox[-1]["id"] + 1) if web_outbox else 1
+        web_outbox.append(
+            {"id": msg_id, "role": role, "kind": kind,
+             "ts": datetime.now().isoformat(timespec="seconds"),
+             "text": text})
+        del web_outbox[:-WEB_OUTBOX_MAX]
+    save_web_state()
+    return msg_id
+
+
+def deliver(chat_id: int, text: str, kind: str = "chat") -> None:
+    """Send to whichever surface this conversation lives on. Pulse
+    output, reminders, and proposals all route through here, so they
+    behave identically with or without Telegram."""
+    if chat_id == WEB_CHAT_ID or not TELEGRAM_ENABLED:
+        web_post("bot", text, kind)
+    else:
+        send_message(chat_id, text)
 
 
 def describe_image(image_bytes: bytes) -> str:
@@ -1582,10 +1737,33 @@ def handle_command(text: str):
 
 def main() -> None:
     token_usage.update(load_json(TOKEN_USAGE_FILE, {}))
-    print("BarrelShell — Barrel started, Telegram polling")
+    load_web_state()
+
+    if not TELEGRAM_ENABLED and not dashboard_available():
+        print("BarrelShell: no interface available — provide Telegram "
+              "credentials (TELEGRAM_BOT_TOKEN + TELEGRAM_ALLOWED_IDS) "
+              "or enable the dashboard (dashboard_port, and a "
+              "dashboard_token if binding beyond localhost).")
+        sys.exit(1)
+    if BOT_TOKEN and not ALLOWED_IDS:
+        print("BarrelShell: TELEGRAM_BOT_TOKEN set but no valid "
+              "TELEGRAM_ALLOWED_IDS — Telegram stays off (an open bot "
+              "would let anyone talk to your Barrel).")
+
     threading.Thread(target=pulse_loop, daemon=True).start()
     threading.Thread(target=dashboard_loop, daemon=True).start()
 
+    if not TELEGRAM_ENABLED:
+        print("BarrelShell — local-only mode: no Telegram credentials, "
+              "so the dashboard is your Barrel's only interface. "
+              "Scheduled tasks and reminders are delivered there.")
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            return
+
+    print("BarrelShell — Barrel started, Telegram polling")
     offset = 0
     while True:
         try:

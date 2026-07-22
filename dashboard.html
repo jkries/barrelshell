@@ -40,6 +40,7 @@ tr:last-child th, tr:last-child td { border-bottom:none; }
        white-space:pre-wrap; font-size:.9rem; line-height:1.35; }
 .me  { background:var(--accent); color:#10141a; align-self:flex-end; }
 .bot { background:#262b33; align-self:flex-start; }
+.bot.proactive { border-left:3px solid var(--accent); }
 .sys { color:var(--dim); font-size:.78rem; align-self:center;
        padding:.15rem; }
 #bar { display:flex; gap:.5rem; margin-top:.6rem; }
@@ -77,8 +78,8 @@ button:disabled { opacity:.45; cursor:default; }
   <section id="chat">
     <h2>Local chat</h2>
     <div id="msgs">
-      <div class="msg sys">Messages go to the same agent as Telegram,
-      in a separate conversation. Local machine only.</div>
+      <div class="msg sys">This chat runs on your machine. Scheduled
+      tasks and reminders appear here too.</div>
     </div>
     <div id="bar">
       <input id="inp" placeholder="Message your Barrel…" autocomplete="off">
@@ -244,6 +245,7 @@ async function sendImage(file) {
   const caption = inp.value.trim();
   inp.value = "";
   addMsg("me", `[photo: ${file.name}]` + (caption ? " — " + caption : ""));
+  sending = true;
   btn.disabled = true;
   inp.disabled = true;
   const thinking = addMsg("sys", "looking at the image…");
@@ -262,16 +264,52 @@ async function sendImage(file) {
     });
     const d = await r.json();
     thinking.remove();
+    if (d.last_id && d.last_id > lastId) lastId = d.last_id;
     if (d.reply !== undefined) addMsg("bot", d.reply, true);
     else addMsg("sys", "error: " + (d.error || r.status));
   } catch (e) {
     thinking.remove();
     addMsg("sys", "upload failed — is the bot running?");
   }
+  sending = false;
   btn.disabled = false;
   inp.disabled = false;
   $("attach-input").value = "";
   inp.focus();
+}
+
+let lastId = 0;
+let pollBusy = false;
+let sending = false;
+
+function renderMessages(list) {
+  for (const m of list) {
+    if (m.role === "me") {
+      addMsg("me", m.text);
+    } else {
+      const div = addMsg("bot", m.text, true);
+      if (m.kind === "pulse" || m.kind === "reminder") {
+        div.classList.add("proactive");
+      }
+    }
+    if (m.id > lastId) lastId = m.id;
+  }
+}
+
+/* A browser can't receive a push, so proactive output — pulse tasks,
+   reminders, task proposals — is polled instead. This also restores
+   the transcript after a page reload. */
+async function pollMessages() {
+  /* Skip while a send is in flight: the reply is rendered from the
+     POST response, and polling mid-turn would draw it twice. */
+  if (pollBusy || sending) return;
+  pollBusy = true;
+  try {
+    const d = await (await fetch("/messages?since=" + lastId)).json();
+    if (d.messages && d.messages.length) renderMessages(d.messages);
+    if (d.last_id && d.last_id > lastId) lastId = d.last_id;
+  } catch (e) { /* status dot already reports unreachable */ }
+  pollBusy = false;
 }
 
 async function send() {
@@ -280,6 +318,7 @@ async function send() {
   if (!text || btn.disabled) return;
   addMsg("me", text);
   inp.value = "";
+  sending = true;
   btn.disabled = true;
   inp.disabled = true;
   const thinking = addMsg("sys", "thinking…");
@@ -291,12 +330,14 @@ async function send() {
     });
     const d = await r.json();
     thinking.remove();
+    if (d.last_id && d.last_id > lastId) lastId = d.last_id;
     if (d.reply !== undefined) addMsg("bot", d.reply, true);
     else addMsg("sys", "error: " + (d.error || r.status));
   } catch (e) {
     thinking.remove();
     addMsg("sys", "request failed — is the bot running?");
   }
+  sending = false;
   btn.disabled = false;
   inp.disabled = false;
   inp.focus();
@@ -312,6 +353,8 @@ $("inp").addEventListener("keydown", e => {
 });
 refresh();
 setInterval(refresh, 5000);
+pollMessages();
+setInterval(pollMessages, 3000);
 </script>
 </body>
 </html>

@@ -63,6 +63,7 @@ pulse.md              scheduled tasks (cron syntax; optional — no file, no pul
 history.md             created automatically on first save (optional to pre-seed)
 pulse_state.json      created automatically (pulse last-run tracking)
 token_usage.json      created automatically (lifetime + per-day token counts)
+web_chat.json         created automatically (dashboard chat transcript)
 workspace/            created automatically — the ONLY folder the file skill can touch
 config.json           optional — your tunables, copied from config.example.json
 skills/               optional — drop-in skill files (see skills/example_roll.py)
@@ -134,6 +135,30 @@ Two model-specific notes:
 
 Switch models with `ollama pull <model>`, edit the `MODEL` constant,
 restart the service.
+
+## 3b. Local-only mode (skipping Telegram)
+
+Telegram is optional. If you provide no `TELEGRAM_BOT_TOKEN` and no
+`TELEGRAM_ALLOWED_IDS`, your Barrel starts in **local-only mode**: the
+dashboard becomes its only interface, and scheduled tasks, reminders,
+and task proposals are delivered to the dashboard's chat panel instead
+of Telegram. The startup banner says which mode it chose.
+
+In local-only mode the web conversation is saved to `web_chat.json`,
+so the transcript survives a restart or a page reload — with no
+Telegram, that file is the only record of your chats.
+
+To use it, skip step 4 entirely and start your Barrel (step 6); open
+http://127.0.0.1:8787 and talk to it there. Telegram remains the
+recommended interface — it's the easier phone experience, and it can
+push messages to you rather than waiting for a browser tab to poll.
+
+> **Viewing the dashboard from another device.** By default it binds
+> to `127.0.0.1` and has no login. If you change `dashboard_host`,
+> your Barrel will **refuse to start the dashboard** unless you also
+> set `"dashboard_token"` in config.json — then open
+> `http://host:8787/?token=YOUR_TOKEN` once and a cookie keeps you
+> signed in. SSH-tunnelling the port stays the safer option.
 
 ## 4. Telegram setup
 

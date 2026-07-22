@@ -1,10 +1,10 @@
 @echo off
 
-set TELEGRAM_BOT_TOKEN=******
-set TELEGRAM_ALLOWED_IDS=******
+set TELEGRAM_BOT_TOKEN=
+set TELEGRAM_ALLOWED_IDS=
 
 REM Optional: pulse/reminder delivery target (defaults to first allowed ID)
-set PULSE_CHAT_ID=******
+set PULSE_CHAT_ID=
 
 REM Optional: Ollama running on ANOTHER machine — remove REM and edit.
 REM set OLLAMA_HOST=
