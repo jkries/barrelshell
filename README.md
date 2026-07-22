@@ -1,3 +1,8 @@
+<h1>
+  <img src="BarrelShellLogoV1.png" alt="BarrelShell logo" width="80">
+  BarrelShell
+</h1><br>
+
 # BarrelShell
 
 Build and run your own AI agent — a **Barrel** — entirely on your own
