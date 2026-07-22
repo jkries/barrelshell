@@ -1,0 +1,316 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>BarrelShell</title>
+<style>
+:root { --bg:#14161a; --panel:#1c1f25; --line:#2a2e35; --fg:#d7dae0;
+        --dim:#8b93a1; --ok:#7bc97e; --bad:#e07a7a; --accent:#6aa9e0; }
+* { box-sizing:border-box; }
+body { margin:0; font-family:system-ui,-apple-system,sans-serif;
+       background:var(--bg); color:var(--fg); }
+header { display:flex; align-items:baseline; gap:.8rem;
+         padding:1rem 1.5rem; border-bottom:1px solid var(--line); }
+h1 { font-size:1.05rem; margin:0; letter-spacing:.08em; }
+#dot { color:var(--bad); transition:color .3s; }
+#dot.ok { color:var(--ok); }
+#uptime { color:var(--dim); font-size:.85rem; }
+main { display:grid; grid-template-columns:1fr 24rem; gap:1rem;
+       padding:1rem 1.5rem; align-items:start; }
+@media (max-width:60rem) { main { grid-template-columns:1fr; }
+  #chat { position:static; height:24rem; } }
+#cards { display:grid; gap:1rem;
+         grid-template-columns:repeat(auto-fit,minmax(17rem,1fr)); }
+section { background:var(--panel); border:1px solid var(--line);
+          border-radius:.55rem; padding:.8rem 1rem; }
+h2 { font-size:.75rem; text-transform:uppercase; letter-spacing:.1em;
+     color:var(--dim); margin:.1rem 0 .6rem; }
+table { border-collapse:collapse; width:100%; font-size:.85rem; }
+th, td { text-align:left; padding:.22rem .5rem .22rem 0;
+         vertical-align:top; border-bottom:1px solid var(--line);
+         word-break:break-word; }
+th { color:var(--dim); font-weight:normal; white-space:nowrap;
+     width:8.5rem; }
+tr:last-child th, tr:last-child td { border-bottom:none; }
+#chat { display:flex; flex-direction:column; position:sticky; top:1rem;
+        height:calc(100vh - 7.5rem); min-height:22rem; }
+#msgs { flex:1; overflow-y:auto; display:flex; flex-direction:column;
+        gap:.5rem; padding:.2rem; }
+.msg { padding:.5rem .7rem; border-radius:.55rem; max-width:92%;
+       white-space:pre-wrap; font-size:.9rem; line-height:1.35; }
+.me  { background:var(--accent); color:#10141a; align-self:flex-end; }
+.bot { background:#262b33; align-self:flex-start; }
+.sys { color:var(--dim); font-size:.78rem; align-self:center;
+       padding:.15rem; }
+#bar { display:flex; gap:.5rem; margin-top:.6rem; }
+#inp { flex:1; background:var(--bg); color:var(--fg);
+       border:1px solid var(--line); border-radius:.45rem;
+       padding:.55rem .65rem; font:inherit; }
+#inp:focus { outline:1px solid var(--accent); }
+button { background:var(--accent); border:none; border-radius:.45rem;
+         color:#10141a; padding:.55rem 1rem; cursor:pointer;
+         font:inherit; }
+button:disabled { opacity:.45; cursor:default; }
+.msg a { color:inherit; text-decoration:underline; word-break:break-all; }
+.bot a { color:var(--accent); }
+.inline-img { display:block; max-width:100%; max-height:16rem;
+              border-radius:.4rem; margin-top:.35rem; }
+#attach { background:var(--panel); color:var(--dim);
+          border:1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>BARRELSHELL</h1>
+  <span id="dot">&#9679;</span>
+  <span id="uptime">connecting…</span>
+</header>
+<main>
+  <div id="cards">
+    <section><h2>Agent</h2><table id="t-agent"></table></section>
+    <section><h2>Tokens</h2><table id="t-tokens"></table></section>
+    <section><h2>Activity</h2><table id="t-activity"></table></section>
+    <section><h2>Loaded in Ollama</h2><table id="t-loaded"></table></section>
+    <section><h2>Pulse tasks</h2><table id="t-pulse"></table></section>
+    <section><h2>Pending reminders</h2><table id="t-rem"></table></section>
+  </div>
+  <section id="chat">
+    <h2>Local chat</h2>
+    <div id="msgs">
+      <div class="msg sys">Messages go to the same agent as Telegram,
+      in a separate conversation. Local machine only.</div>
+    </div>
+    <div id="bar">
+      <input id="inp" placeholder="Message your Barrel…" autocomplete="off">
+      <button id="attach" title="Send an image">&#128206;</button>
+      <button id="send">Send</button>
+      <input id="attach-input" type="file" accept="image/*" hidden>
+    </div>
+  </section>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const dash = v => (v === null || v === undefined || v === "") ? "–" : v;
+
+/* All rendering uses textContent — never innerHTML — so model output
+   and web-derived content can't inject markup into this page. */
+function kvRows(tableId, pairs) {
+  const t = $(tableId);
+  t.replaceChildren();
+  for (const [k, v] of pairs) {
+    const tr = document.createElement("tr");
+    const th = document.createElement("th");
+    th.textContent = k;
+    const td = document.createElement("td");
+    td.textContent = dash(v);
+    tr.append(th, td);
+    t.append(tr);
+  }
+}
+function listRows(tableId, items, cols, emptyText) {
+  const t = $(tableId);
+  t.replaceChildren();
+  if (!items || !items.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.textContent = emptyText;
+    tr.append(td);
+    t.append(tr);
+    return;
+  }
+  for (const it of items) {
+    const tr = document.createElement("tr");
+    for (const c of cols) {
+      const td = document.createElement("td");
+      td.textContent = dash(c(it));
+      tr.append(td);
+    }
+    t.append(tr);
+  }
+}
+
+async function refresh() {
+  try {
+    const s = await (await fetch("/status.json")).json();
+    $("dot").className = "ok";
+    $("uptime").textContent = `up ${s.uptime} · started ${s.started}`;
+    const st = s.stats, tk = s.tokens;
+    kvRows("t-agent", [
+      ["model", `${s.model}  (ctx ${s.num_ctx})`],
+      ["vision", s.vision_model],
+      ["ollama", s.ollama],
+      ["skills", (s.skills || []).join(", ")],
+    ]);
+    kvRows("t-tokens", [
+      ["session", `${st.session_tokens_in} in / ${st.session_tokens_out} out`],
+      ["last turn", tk.last_turn
+        ? `${tk.last_turn.in} in / ${tk.last_turn.out} out` : null],
+      ["context", tk.last_prompt_tokens
+        ? `~${tk.last_prompt_tokens} / ${s.num_ctx}` : null],
+      ["speed", tk.last_speed_tps ? `${tk.last_speed_tps} tok/s` : null],
+      ["today", tk.today ? `${tk.today.in} in / ${tk.today.out} out` : null],
+      ["lifetime", tk.lifetime
+        ? `${tk.lifetime.in} in / ${tk.lifetime.out} out (${tk.lifetime.calls} calls)`
+        : null],
+    ]);
+    kvRows("t-activity", [
+      ["turns", st.turns],
+      ["facts saved", st.facts_saved],
+      ["errors", st.errors],
+      ["tool calls", Object.entries(st.tools)
+        .map(([k, v]) => `${k}: ${v}`).join("  ") || "none yet"],
+      ["last msg", st.last_user ? `[${st.last_kind}] ${st.last_user}` : null],
+      ["last reply", st.last_reply],
+    ]);
+    listRows("t-loaded", s.ollama_loaded, [
+      m => m.name,
+      m => `${m.vram_gb} / ${m.total_gb} GB VRAM`,
+      m => `until ${m.keeps_until}`,
+    ], "nothing loaded");
+    listRows("t-pulse", s.pulse_tasks, [
+      p => p.name,
+      p => p.schedule,
+      p => (p.last_run || "never").slice(0, 16),
+    ], "no pulse tasks");
+    listRows("t-rem", s.pending_reminders, [
+      r => r.due,
+      r => r.message,
+    ], "none pending");
+  } catch (e) {
+    $("dot").className = "";
+    $("uptime").textContent = "bot unreachable";
+  }
+}
+
+const URL_RE = /https?:\/\/[^\s<>"']+/g;
+const IMG_EXT = /\.(jpe?g|png|gif|webp)$/i;
+
+function isWorkspaceImage(url) {
+  /* Only same-origin /workspace/ images render inline — auto-loading
+     arbitrary remote images from model output would be a tracking
+     vector. Everything else becomes a plain link. */
+  try {
+    const u = new URL(url, location.origin);
+    return u.origin === location.origin &&
+           u.pathname.startsWith("/workspace/") &&
+           IMG_EXT.test(u.pathname);
+  } catch (e) { return false; }
+}
+
+function renderRich(div, text) {
+  /* Linkify via DOM nodes and textContent — never innerHTML — with
+     hrefs restricted to http/https. Model output still cannot
+     inject markup or javascript: URLs. */
+  let last = 0;
+  for (const m of text.matchAll(URL_RE)) {
+    let url = m[0];
+    const trail = url.match(/[).,;:!?\]]+$/);
+    if (trail) url = url.slice(0, trail.index);
+    div.append(document.createTextNode(text.slice(last, m.index)));
+    last = m.index + url.length;
+    const a = document.createElement("a");
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    if (isWorkspaceImage(url)) {
+      const img = document.createElement("img");
+      img.src = url;
+      img.alt = url;
+      img.className = "inline-img";
+      a.append(img);
+    } else {
+      a.textContent = url;
+    }
+    div.append(a);
+  }
+  div.append(document.createTextNode(text.slice(last)));
+}
+
+function addMsg(cls, text, rich) {
+  const div = document.createElement("div");
+  div.className = "msg " + cls;
+  if (rich && cls === "bot") renderRich(div, text);
+  else div.textContent = text;
+  $("msgs").append(div);
+  $("msgs").scrollTop = $("msgs").scrollHeight;
+  return div;
+}
+
+async function sendImage(file) {
+  if (!file) return;
+  const inp = $("inp"), btn = $("send");
+  const caption = inp.value.trim();
+  inp.value = "";
+  addMsg("me", `[photo: ${file.name}]` + (caption ? " — " + caption : ""));
+  btn.disabled = true;
+  inp.disabled = true;
+  const thinking = addMsg("sys", "looking at the image…");
+  try {
+    const b64 = await new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result.split(",")[1]);
+      r.onerror = () => rej(new Error("read failed"));
+      r.readAsDataURL(file);
+    });
+    const r = await fetch("/chat-image", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image_b64: b64, name: file.name,
+                             caption: caption }),
+    });
+    const d = await r.json();
+    thinking.remove();
+    if (d.reply !== undefined) addMsg("bot", d.reply, true);
+    else addMsg("sys", "error: " + (d.error || r.status));
+  } catch (e) {
+    thinking.remove();
+    addMsg("sys", "upload failed — is the bot running?");
+  }
+  btn.disabled = false;
+  inp.disabled = false;
+  $("attach-input").value = "";
+  inp.focus();
+}
+
+async function send() {
+  const inp = $("inp"), btn = $("send");
+  const text = inp.value.trim();
+  if (!text || btn.disabled) return;
+  addMsg("me", text);
+  inp.value = "";
+  btn.disabled = true;
+  inp.disabled = true;
+  const thinking = addMsg("sys", "thinking…");
+  try {
+    const r = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text }),
+    });
+    const d = await r.json();
+    thinking.remove();
+    if (d.reply !== undefined) addMsg("bot", d.reply, true);
+    else addMsg("sys", "error: " + (d.error || r.status));
+  } catch (e) {
+    thinking.remove();
+    addMsg("sys", "request failed — is the bot running?");
+  }
+  btn.disabled = false;
+  inp.disabled = false;
+  inp.focus();
+  refresh();
+}
+
+$("send").addEventListener("click", send);
+$("attach").addEventListener("click", () => $("attach-input").click());
+$("attach-input").addEventListener("change",
+  e => sendImage(e.target.files[0]));
+$("inp").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

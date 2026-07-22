@@ -1,0 +1,15 @@
+{
+  "_readme": "Copy to config.json and edit. Any key you omit uses the built-in default, so core updates never break your config. Secrets do NOT go here \u2014 they stay in .env / run_barrel.bat. Set vision_model (e.g. gemma3:4b) to enable photo understanding via Telegram; empty disables it.",
+  "model": "qwen3:8b",
+  "num_ctx": 16384,
+  "max_tool_rounds": 3,
+  "max_turns": 40,
+  "search_results": 5,
+  "fetch_max_chars": 4000,
+  "download_max_bytes": 20000000,
+  "pulse_check_seconds": 30,
+  "dashboard_host": "127.0.0.1",
+  "dashboard_port": 8787,
+  "workspace_dir": "workspace",
+  "vision_model": ""
+}
