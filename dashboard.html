@@ -168,11 +168,12 @@ async function refresh() {
       m => `${m.vram_gb} / ${m.total_gb} GB VRAM`,
       m => `until ${m.keeps_until}`,
     ], "nothing loaded");
-    listRows("t-pulse", s.pulse_tasks, [
-      p => p.name,
-      p => p.schedule,
-      p => (p.last_run || "never").slice(0, 16),
-    ], "no pulse tasks");
+    const pulseRows = (s.pulse_tasks || []).map(p => ({
+      a: p.name, b: p.schedule,
+      c: (p.last_run || "never").slice(0, 16) }))
+      .concat((s.pulse_problems || []).map(p => ({ a: "\u26a0", b: p, c: "" })));
+    listRows("t-pulse", pulseRows,
+      [r => r.a, r => r.b, r => r.c], "no pulse tasks");
     listRows("t-rem", s.pending_reminders, [
       r => r.due,
       r => r.message,

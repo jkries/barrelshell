@@ -1116,21 +1116,50 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
 # =============================================================== pulse
 
 PULSE_TASK_RE = re.compile(
-    r"^##\s+(?P<name>\S+)\s*\nschedule:\s*(?P<cron>[^\n]+)\n"
-    r"(?P<prompt>.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL)
+    r"^#{2,}[ \t]*(?P<name>\S[^\n]*?)[ \t]*\n"      # ## task name
+    r"\s*schedule:[ \t]*(?P<cron>[^\n]+?)[ \t]*(?:\n|\Z)"
+    r"(?P<prompt>.*?)(?=^#{2,}[ \t]*\S|\Z)",
+    re.MULTILINE | re.DOTALL | re.IGNORECASE)
+
+# Any heading at all — used to catch entries that LOOK like tasks but
+# don't parse, so a typo never fails silently again.
+PULSE_HEADING_RE = re.compile(r"^#{2,}[ \t]*(\S[^\n]*)$", re.MULTILINE)
+
+pulse_problems: list[str] = []   # surfaced in /pulse and the dashboard
+_pulse_warned: set = set()
+
+
+def _pulse_warn(msg: str) -> None:
+    """Print once per distinct problem — the pulse loop re-parses every
+    30s and would otherwise flood the log."""
+    if msg not in _pulse_warned:
+        _pulse_warned.add(msg)
+        print(f"pulse: {msg}")
+        log_event("pulse_problem", detail=msg)
 
 
 def parse_pulse() -> list[dict]:
-    tasks = []
-    for m in PULSE_TASK_RE.finditer(read_file(PULSE_FILE)):
+    text = read_file(PULSE_FILE)
+    tasks, seen = [], set()
+    for m in PULSE_TASK_RE.finditer(text):
+        name = m.group("name").strip()
         cron = m.group("cron").strip()
-        # "@reboot" (borrowed from crontab) = fire once per process
-        # start instead of on a time schedule.
+        seen.add(name)
         if cron != "@reboot" and not croniter.is_valid(cron):
-            print(f"pulse: invalid schedule '{cron}'")
+            _pulse_warn(f"task '{name}': invalid schedule '{cron}'")
             continue
-        tasks.append({"name": m.group("name"), "cron": cron,
+        tasks.append({"name": name, "cron": cron,
                       "prompt": m.group("prompt").strip()})
+    # Loud about headings that never became tasks — a missing or
+    # misspelled 'schedule:' line used to vanish without a trace.
+    for heading in PULSE_HEADING_RE.findall(text):
+        if heading.strip() not in seen:
+            _pulse_warn(f"'{heading.strip()}' has no valid 'schedule:' "
+                        f"line on the following line — ignored")
+    live = {t["name"] for t in tasks}
+    pulse_problems[:] = [p for p in sorted(_pulse_warned)
+                         if not any(f"'{n}'" in p and "invalid" not in p
+                                    for n in live)]
     return tasks
 
 
@@ -1226,6 +1255,7 @@ def gather_status() -> dict:
                          "last_run": ps_state.get(t["name"])}
                         for t in parse_pulse()],
         "pending_reminders": load_json(REMINDERS_FILE, []),
+        "pulse_problems": list(pulse_problems),
         "tokens": {
             "session_in": stats["session_tokens_in"],
             "session_out": stats["session_tokens_out"],
@@ -1466,9 +1496,9 @@ UNSUPPORTED = {
 
 COMMANDS = {
     "/history": lambda: read_file(HISTORY_FILE, "(no history yet)"),
-    "/pulse": lambda: "\n".join(f"{t['name']}: {t['cron']}"
-                                for t in parse_pulse())
-                      or "(no pulse tasks)",
+    "/pulse": lambda: "\n".join(
+        [f"{t['name']}: {t['cron']}" for t in parse_pulse()]
+        + [f"\u26a0 {p}" for p in pulse_problems]) or "(no pulse tasks)",
     "/reminders": lambda: "\n".join(
         f"{r['due']}: {r['message']}"
         for r in load_json(REMINDERS_FILE, []))
@@ -1510,9 +1540,10 @@ def remove_pulse_task(name: str) -> str:
     """Human-only removal of an active task, by name."""
     name = name.strip().lower()
     content = read_file(PULSE_FILE)
-    pattern = re.compile(rf"^## {re.escape(name)}\s*\n"
-                         rf"schedule:[^\n]*\n.*?(?=^## |\Z)",
-                         re.MULTILINE | re.DOTALL)
+    pattern = re.compile(rf"^#{{2,}}[ \t]*{re.escape(name)}[ \t]*\n"
+                         rf"\s*schedule:[^\n]*(?:\n|\Z)"
+                         rf".*?(?=^#{{2,}}[ \t]*\S|\Z)",
+                         re.MULTILINE | re.DOTALL | re.IGNORECASE)
     new_content, n = pattern.subn("", content)
     if not n:
         names = ", ".join(t["name"] for t in parse_pulse()) or "none"
