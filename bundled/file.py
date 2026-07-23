@@ -99,7 +99,8 @@ def file(arg: str, chat_id: int) -> str:
         except requests.RequestException as e:
             return f"(send failed: {e.__class__.__name__})"
         core.log_event("file_sent", name=name, bytes=size, chat_id=chat_id)
-        return f"(sent {name} to the chat — {size} bytes)"
+        return (f"(sent {name} — the user has now actually received "
+                f"this file in the chat, {size} bytes)")
 
     if verb == "download":
         url, _, name = rest.partition("|")
@@ -139,7 +140,10 @@ def file(arg: str, chat_id: int) -> str:
                     f.write(chunk)
         except requests.RequestException as e:
             return f"(download failed: {e})"
-        return f"(downloaded {name}, {size} bytes)"
+        return (f"(downloaded {name} into the workspace, {size} bytes. "
+                f"The user has NOT received this file — it is only on "
+                f"disk. If they asked you for it, your next action must "
+                f"be <file>send {name}</file>.)")
 
     return ("(unknown file command — use: list | read <name> | "
             "write <name> | <content> | download <url> | <name>)")
@@ -152,7 +156,9 @@ SKILL = {
             "<file>read notes.txt</file>, "
             "<file>write notes.txt | the content</file>, "
             "<file>download https://url | saved-name.pdf</file> (always "
-            "give the saved name a matching file extension), "
+            "give the saved name a matching file extension; downloading "
+            "only puts a file on disk — it does NOT give it to the "
+            "user), "
             "<file>send name.jpg | optional caption</file> to deliver a "
             "workspace file (image/audio/any) to the user in Telegram",
     "handler": file,

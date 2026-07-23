@@ -46,9 +46,10 @@ def images(query: str, chat_id: int) -> str:
     if not lines:
         return f"(no usable image URLs found for '{query}')"
 
-    lines.append("(These are direct image URLs. To give one to the "
-                 "user, download it into the workspace with a matching "
-                 "file extension, then send it.)")
+    lines.append("(These are direct image URLs, not files the user "
+                 "can see. Two more steps are required: download one "
+                 "into the workspace with a matching extension, THEN "
+                 "send it with the file skill.)")
     return "\n".join(lines)
 
 
