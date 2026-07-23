@@ -66,7 +66,8 @@ token_usage.json      created automatically (lifetime + per-day token counts)
 web_chat.json         created automatically (dashboard chat transcript)
 workspace/            created automatically — the ONLY folder the file skill can touch
 config.json           optional — your tunables, copied from config.example.json
-skills/               optional — drop-in skill files (see skills/example_roll.py)
+bundled/              BarrelShell's own tools, as skills — updates with the platform
+skills/               optional — YOUR drop-in skills; updates never touch this
 reminders.json        created automatically (pending one-shot reminders)
 agent_log.jsonl       created automatically (full turn/tool log)
 ```

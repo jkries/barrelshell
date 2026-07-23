@@ -1,5 +1,15 @@
 # Creating a New Skill for Your Barrel
 
+> BarrelShell's own tools (calc, clock, weather, search, fetch,
+> remind, file) are themselves skills, living in `bundled/`. Reading
+> those is the fastest way to learn the patterns below — `calc.py` is
+> fully self-contained, while `file.py` shows how a skill uses the
+> core API (`import barrel_v1 as core`) for shared, security-sensitive
+> primitives. `bundled/` ships with BarrelShell and updates with it;
+> your own skills go in `skills/`, which updates never touch. A
+> `skills/` file with the same name as a bundled one overrides it.
+
+
 Every BarrelShell skill is two things: a **handler function** and an
 **entry in the `TOOLS` registry**. The protocol section of the system
 prompt is generated from the registry, so there is no third place to
