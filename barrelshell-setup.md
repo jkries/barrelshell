@@ -18,13 +18,15 @@ machine. To use an Ollama instance on another device, uncomment the
 
 ---
 
-## 1. Project directory and virtual environment
+## 1. Get the files and set up a virtual environment
 
 **Linux:**
 
 ```bash
-mkdir -p ~/barrelshell && cd ~/barrelshell
-sudo apt update && sudo apt install -y python3-venv
+sudo apt update && sudo apt install -y git python3-venv
+
+git clone https://github.com/jkries/barrelshell.git ~/barrelshell
+cd ~/barrelshell
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -38,7 +40,8 @@ readlink -f .venv/bin/python   # note this absolute path for systemd
 to PATH"), then:
 
 ```powershell
-mkdir C:\barrelshell; cd C:\barrelshell
+git clone https://github.com/jkries/barrelshell.git C:\barrelshell
+cd C:\barrelshell
 
 py -3 -m venv .venv
 .venv\Scripts\Activate.ps1
@@ -52,24 +55,62 @@ pip install ollama ddgs requests croniter tzdata
 The venv's interpreter is `C:\barrelshell\.venv\Scripts\python.exe` —
 services run it directly, no activation needed.
 
+> No git? Download the ZIP from
+> https://github.com/jkries/barrelshell and extract it to that folder
+> instead — the rest of the guide is identical. To update later,
+> `git pull` (or re-download); your `config.json`, `identity.md`,
+> `pulse.md`, `skills/`, and all runtime state are yours and are never
+> overwritten.
+
 ## 2. Project files
 
-Place in the project directory:
+The clone gives you the first group below. Copy the three `.example`
+files to their real names — those copies are yours, and updates never
+overwrite them:
+
+**Linux:**
+
+```bash
+cp config.example.json config.json
+cp identity.example.md identity.md
+cp pulse.example.md pulse.md
+```
+
+**Windows:**
+
+```powershell
+copy config.example.json config.json
+copy identity.example.md identity.md
+copy pulse.example.md pulse.md
+copy run_barrel.example.bat run_barrel.bat
+```
 
 ```
-barrel_v1.py   the bot script
-identity.md               persona file
-pulse.md              scheduled tasks (cron syntax; optional — no file, no pulses)
-history.md             created automatically on first save (optional to pre-seed)
-pulse_state.json      created automatically (pulse last-run tracking)
-token_usage.json      created automatically (lifetime + per-day token counts)
-web_chat.json         created automatically (dashboard chat transcript)
-workspace/            created automatically — the ONLY folder the file skill can touch
-config.json           optional — your tunables, copied from config.example.json
-bundled/              BarrelShell's own tools, as skills — updates with the platform
-skills/               optional — YOUR drop-in skills; updates never touch this
-reminders.json        created automatically (pending one-shot reminders)
-agent_log.jsonl       created automatically (full turn/tool log)
+Ships with the repo:
+  barrel_v1.py          the core
+  dashboard.html        the dashboard UI — edit and refresh to restyle
+  bundled/              BarrelShell's own tools, as skills — updates with the platform
+  config.example.json   copy to config.json and edit
+  identity.example.md   copy to identity.md — your Barrel's persona
+  pulse.example.md      copy to pulse.md — scheduled tasks (cron syntax)
+  run_barrel.example.bat  Windows: copy to run_barrel.bat (holds settings + restart loop)
+
+Yours, never touched by updates:
+  config.json           your tunables, merged over built-in defaults
+  identity.md           persona
+  pulse.md              scheduled tasks
+  skills/               your own drop-in skills
+  .env / run_barrel.bat your credentials (see step 5)
+
+Created automatically:
+  history.md            durable facts your Barrel saves
+  web_chat.json         dashboard chat transcript
+  pulse_state.json      pulse last-run tracking
+  pulse_pending.json    tasks awaiting /approve
+  reminders.json        pending one-shot reminders
+  token_usage.json      lifetime + per-day token counts
+  agent_log.jsonl       full turn/tool log
+  workspace/            the ONLY folder the file skill can touch
 ```
 
 ## 2b. Configuration and drop-in skills
@@ -411,6 +452,11 @@ service logs are for when it *crashes*.
 Restart is only needed for changes to the **script**. `identity.md`,
 `history.md`, and `pulse.md` are re-read continuously — persona and
 schedule edits take effect within seconds, no restart.
+
+Schedules can be cron (`0 15 * * *`), `@reboot`, `@every 30m`, or
+`@idle 4h` — the last fires once after that long with no contact from
+you, then stays quiet until you speak to your Barrel again. Durations
+use `m`, `h`, or `d`.
 
 If a pulse task misbehaves, check `pulse_state.json` for its last-run
 timestamp; a brand-new task arms from when it's first seen rather

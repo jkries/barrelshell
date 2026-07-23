@@ -1,8 +1,11 @@
 # Pulse
 
 Scheduled tasks. Each task is a `## name` section with a `schedule:`
-line in standard cron syntax (min hour day month weekday) — or `@reboot` to fire once each time
-the bot process starts — followed by
+line in standard cron syntax (min hour day month weekday), or one of:
+`@reboot` (once each time the bot starts), `@every 30m` (a repeating
+interval, relative to its own last run), or `@idle 4h` (once after
+that long with no contact from you — it won't fire again until you
+speak to it). Durations use m, h, or d. Then comes
 the prompt the agent runs at that time. If the agent decides nothing
 is worth sending, it replies PULSE_OK and stays silent.
 
@@ -37,3 +40,10 @@ schedule: @reboot
 You just came back online after a reboot, crash, or restart. Send a
 single short line confirming you're back up, with the current time.
 No fanfare.
+
+## check-in
+schedule: @idle 2d
+
+We haven't spoken in a couple of days. Send one short, low-pressure
+line — something you noticed, or just hello. Don't ask me to do
+anything. If nothing feels worth saying, reply PULSE_OK.

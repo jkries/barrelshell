@@ -331,8 +331,10 @@ def run_pulse(arg: str, chat_id: int) -> str:
         if not PULSE_NAME_RE.match(name):
             return ("(bad task name — lowercase letters, digits, "
                     "hyphens, 2-41 chars)")
-        if cron != "@reboot" and not croniter.is_valid(cron):
-            return f"(invalid cron expression: {cron})"
+        if not valid_schedule(cron):
+            return (f"(invalid schedule '{cron}' — use cron like "
+                    f"'0 15 * * *', or @reboot, or @every 30m, or "
+                    f"@idle 4h; duration units are m/h/d)")
         if any(t["name"] == name for t in parse_pulse()):
             return f"(a task named '{name}' already exists in pulse.md)"
         pending = load_json(PENDING_PULSE_FILE, {})
@@ -424,8 +426,12 @@ TOOLS: dict = {
         "desc": "Propose a recurring/scheduled task. You can only "
                 "PROPOSE — the user must approve with /approve before "
                 "it activates, so always tell them that. Grammar: "
-                "<pulse>add task-name | cron like '0 15 * * *' or "
-                "@reboot | what to do</pulse>, or <pulse>list</pulse>. "
+                "<pulse>add task-name | schedule | what to "
+                "do</pulse>, or <pulse>list</pulse>. The schedule is "
+                "cron ('0 15 * * *' = 3pm daily), @reboot (on "
+                "startup), @every 30m (repeating interval), or "
+                "@idle 4h (once after that long with no contact from "
+                "the user). Duration units are m, h, d. "
                 "Use when asked for something daily, weekly, or "
                 "recurring.",
     },
@@ -596,6 +602,10 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
         stats["turns"] += 1
         stats["last_user"] = user_text[:300]
         stats["last_user_ts"] = datetime.now().isoformat(timespec="seconds")
+        if kind != "pulse":
+            # A human said something — resets every @idle countdown.
+            global last_contact_at
+            last_contact_at = datetime.now()
         stats["last_kind"] = kind
         convo = conversations.setdefault(chat_id, [])
         convo.append({"role": "user", "content": user_text})
@@ -704,6 +714,73 @@ def _pulse_warn(msg: str) -> None:
         log_event("pulse_problem", detail=msg)
 
 
+last_contact_at: datetime = datetime.now()
+
+
+DURATION_RE = re.compile(r"(\d+)\s*([mhd])", re.IGNORECASE)
+LAST_CONTACT_KEY = "_last_user_contact"   # stored in pulse_state.json
+
+
+def parse_duration(text: str):
+    """'30m' / '4h' / '3d' -> timedelta. None if it isn't a duration."""
+    m = DURATION_RE.fullmatch(text.strip())
+    if not m:
+        return None
+    n, unit = int(m.group(1)), m.group(2).lower()
+    if n <= 0:
+        return None
+    return {"m": timedelta(minutes=n), "h": timedelta(hours=n),
+            "d": timedelta(days=n)}[unit]
+
+
+def schedule_kind(cron: str):
+    """Classify a schedule line. Returns (kind, duration|None), where
+    kind is 'reboot', 'every', 'idle', 'cron', or None if invalid."""
+    c = cron.strip()
+    low = c.lower()
+    if low == "@reboot":
+        return ("reboot", None)
+    for prefix, kind in (("@every", "every"), ("@idle", "idle")):
+        if low.startswith(prefix):
+            d = parse_duration(c[len(prefix):])
+            return (kind, d) if d else (None, None)
+    return ("cron", None) if croniter.is_valid(c) else (None, None)
+
+
+def valid_schedule(cron: str) -> bool:
+    return schedule_kind(cron)[0] is not None
+
+
+def task_is_due(task: dict, state: dict, now: datetime,
+                last_contact: datetime) -> bool:
+    """Whether a scheduled task should fire right now.
+
+    @every N — fires N after its own last run (relative), unlike cron
+      which fires at fixed clock times.
+    @idle N  — fires once when there has been no user contact for N.
+      It won't fire again until you talk to the Barrel, so a long
+      silence produces one message, not a nag every N.
+    """
+    kind, dur = schedule_kind(task["cron"])
+    last_iso = state.get(task["name"])
+
+    if kind == "idle":
+        if now - last_contact < dur:
+            return False
+        # Require contact since the last firing → once per idle period.
+        if last_iso and datetime.fromisoformat(last_iso) >= last_contact:
+            return False
+        return True
+
+    if kind == "every":
+        if last_iso is None:
+            return False          # arm from now; don't fire on sight
+        return now - datetime.fromisoformat(last_iso) >= dur
+
+    last = datetime.fromisoformat(last_iso) if last_iso else now
+    return now >= croniter(task["cron"], last).get_next(datetime)
+
+
 def parse_pulse() -> list[dict]:
     text = read_file(PULSE_FILE)
     tasks, seen = [], set()
@@ -711,8 +788,10 @@ def parse_pulse() -> list[dict]:
         name = m.group("name").strip()
         cron = m.group("cron").strip()
         seen.add(name)
-        if cron != "@reboot" and not croniter.is_valid(cron):
-            _pulse_warn(f"task '{name}': invalid schedule '{cron}'")
+        if not valid_schedule(cron):
+            _pulse_warn(f"task '{name}': invalid schedule '{cron}' — use "
+                        f"cron (0 15 * * *), @reboot, @every 30m, or "
+                        f"@idle 4h (units: m/h/d)")
             continue
         tasks.append({"name": name, "cron": cron,
                       "prompt": m.group("prompt").strip()})
@@ -765,13 +844,21 @@ def pulse_loop() -> None:
         return
     print("pulse: scheduler started")
     state = load_json(PULSE_STATE_FILE, {})
+    # Idle is measured from the last time a human actually said
+    # something. Persisted, so a restart doesn't fake fresh contact.
+    global last_contact_at
+    try:
+        if state.get(LAST_CONTACT_KEY):
+            last_contact_at = datetime.fromisoformat(state[LAST_CONTACT_KEY])
+    except ValueError:
+        pass
 
     # @reboot tasks: fire once, now. The 10-minute guard matters —
     # without it, a crash-looping bot would announce "I'm back!"
     # every restart cycle, forever.
     startup = datetime.now()
     for task in parse_pulse():
-        if task["cron"] != "@reboot":
+        if schedule_kind(task["cron"])[0] != "reboot":
             continue
         last_iso = state.get(task["name"])
         if last_iso and (startup - datetime.fromisoformat(last_iso)
@@ -788,18 +875,21 @@ def pulse_loop() -> None:
         except Exception as e:
             print(f"pulse: reminder check failed: {e}")
 
+        last_contact = last_contact_at
+        if state.get(LAST_CONTACT_KEY) != last_contact.isoformat():
+            state[LAST_CONTACT_KEY] = last_contact.isoformat()
+            save_json(PULSE_STATE_FILE, state)
+
         for task in parse_pulse():
-            if task["cron"] == "@reboot":
+            kind = schedule_kind(task["cron"])[0]
+            if kind == "reboot":
                 continue  # handled at startup, not on a schedule
-            last_iso = state.get(task["name"])
-            last = datetime.fromisoformat(last_iso) if last_iso else now
-            due_at = croniter(task["cron"], last).get_next(datetime)
-            if now < due_at:
-                if last_iso is None:
-                    state[task["name"]] = now.isoformat()
-                    save_json(PULSE_STATE_FILE, state)
-                continue
-            fire_task(task, state, now)
+            if task_is_due(task, state, now, last_contact):
+                fire_task(task, state, now)
+            elif state.get(task["name"]) is None:
+                # New task: arm from now so it never back-fires.
+                state[task["name"]] = now.isoformat()
+                save_json(PULSE_STATE_FILE, state)
         time.sleep(PULSE_CHECK_SECONDS)
 
 # ============================================================ dashboard
@@ -1223,8 +1313,11 @@ def approve_pending(name: str) -> str:
                 f"{task['prompt']}\n")
     save_json(PENDING_PULSE_FILE, pending)
     log_event("pulse_approved", name=name, cron=task["cron"])
-    note = (" (@reboot tasks first fire at the next restart)"
-            if task["cron"] == "@reboot" else "")
+    kind = schedule_kind(task["cron"])[0]
+    note = {"reboot": " (first fires at the next restart)",
+            "every": " (interval runs from now)",
+            "idle": " (fires once after that long with no contact, "
+                    "then not again until you speak to me)"}.get(kind, "")
     return f"Approved — '{name}' ({task['cron']}) is now active{note}."
 
 
