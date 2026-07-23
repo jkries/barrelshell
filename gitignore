@@ -1,0 +1,54 @@
+# ---------------------------------------------------------------
+# Secrets — these hold your bot token. Never commit.
+# ---------------------------------------------------------------
+.env
+run_barrel.bat
+*.local.*
+
+# ---------------------------------------------------------------
+# User-owned config and persona — ship the .example versions instead
+# ---------------------------------------------------------------
+config.json
+identity.md
+pulse.md
+
+# ---------------------------------------------------------------
+# Your own skills. bundled/ ships with the platform and IS tracked;
+# skills/ belongs to the user, so updates never touch it.
+# ---------------------------------------------------------------
+skills/*
+!skills/.gitkeep
+!skills/README.md
+
+# ---------------------------------------------------------------
+# Runtime state — personal to each Barrel, regenerated on demand
+# ---------------------------------------------------------------
+history.md
+web_chat.json
+pulse_state.json
+pulse_pending.json
+reminders.json
+token_usage.json
+agent_log.jsonl
+service.log
+workspace/
+
+# ---------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
