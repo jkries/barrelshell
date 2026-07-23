@@ -213,40 +213,7 @@ def record_tokens(t_in: int, t_out: int) -> None:
     day["out"] += t_out
     save_json(TOKEN_USAGE_FILE, token_usage)
 
-# ---------------------------------------------------------- tool: search
-
-def run_search(query: str, chat_id: int) -> str:
-    try:
-        results = DDGS().text(query, max_results=SEARCH_RESULTS)
-    except Exception as e:
-        return f"(search failed: {e})"
-    if not results:
-        return "(no results)"
-    return "\n".join(f"- {r.get('title','')}\n  {r.get('href','')}\n"
-                     f"  {r.get('body','')}" for r in results)
-
-# ----------------------------------------------------------- tool: fetch
-
-class _TextExtractor(HTMLParser):
-    SKIP = {"script", "style", "noscript", "template"}
-
-    def __init__(self):
-        super().__init__()
-        self._skip_depth = 0
-        self.chunks: list[str] = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag in self.SKIP:
-            self._skip_depth += 1
-
-    def handle_endtag(self, tag):
-        if tag in self.SKIP and self._skip_depth:
-            self._skip_depth -= 1
-
-    def handle_data(self, data):
-        if not self._skip_depth and data.strip():
-            self.chunks.append(data.strip())
-
+# ------------------------------------------------ shared: SSRF guard
 
 def _is_private_host(hostname: str) -> bool:
     """SSRF guard: refuse URLs that resolve to loopback/private/link-local
@@ -262,119 +229,6 @@ def _is_private_host(hostname: str) -> bool:
                 or ip.is_reserved):
             return True
     return False
-
-
-def run_fetch(url: str, chat_id: int) -> str:
-    parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return "(fetch refused: only http/https URLs)"
-    if not parsed.hostname or _is_private_host(parsed.hostname):
-        return "(fetch refused: host is private/unresolvable)"
-    try:
-        r = requests.get(url, timeout=15, headers={
-            "User-Agent": "Mozilla/5.0 (BarrelShell agent)"})
-        r.raise_for_status()
-    except requests.RequestException as e:
-        return f"(fetch failed: {e})"
-    ctype = r.headers.get("content-type", "")
-    if "html" not in ctype and "text" not in ctype:
-        return f"(fetch refused: content-type {ctype})"
-    if "html" in ctype:
-        p = _TextExtractor()
-        p.feed(r.text[:400_000])
-        text = " ".join(p.chunks)
-    else:
-        text = r.text
-    text = re.sub(r"\s+", " ", text).strip()
-    if len(text) > FETCH_MAX_CHARS:
-        text = text[:FETCH_MAX_CHARS] + " …(truncated)"
-    return text or "(page had no extractable text)"
-
-# --------------------------------------------------------- tool: weather
-
-_WMO = {0: "clear", 1: "mostly clear", 2: "partly cloudy", 3: "overcast",
-        45: "fog", 48: "rime fog", 51: "light drizzle", 53: "drizzle",
-        55: "heavy drizzle", 61: "light rain", 63: "rain",
-        65: "heavy rain", 66: "freezing rain", 71: "light snow",
-        73: "snow", 75: "heavy snow", 77: "snow grains",
-        80: "rain showers", 81: "rain showers", 82: "violent showers",
-        85: "snow showers", 86: "snow showers", 95: "thunderstorm",
-        96: "thunderstorm w/ hail", 99: "thunderstorm w/ hail"}
-
-
-def run_weather(place: str, chat_id: int) -> str:
-    place = place.strip()
-    zip_m = re.fullmatch(r"(\d{5})(?:-\d{4})?", place)
-    try:
-        if zip_m:  # US ZIP — Open-Meteo's geocoder mishandles these
-            z = requests.get(
-                f"https://api.zippopotam.us/us/{zip_m.group(1)}",
-                timeout=15).json()
-            p = z["places"][0]
-            loc = {"latitude": float(p["latitude"]),
-                   "longitude": float(p["longitude"]),
-                   "name": p["place name"],
-                   "admin1": p["state abbreviation"],
-                   "country_code": "US"}
-        else:
-            geo = requests.get(
-                "https://geocoding-api.open-meteo.com/v1/search",
-                params={"name": place, "count": 1}, timeout=15).json()
-            if not geo.get("results"):
-                return f"(no location found for '{place}')"
-            loc = geo["results"][0]
-        wx = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": loc["latitude"], "longitude": loc["longitude"],
-                "current": "temperature_2m,apparent_temperature,"
-                           "weather_code,wind_speed_10m,precipitation",
-                "daily": "temperature_2m_max,temperature_2m_min,"
-                         "precipitation_probability_max,weather_code",
-                "temperature_unit": "fahrenheit",
-                "wind_speed_unit": "mph",
-                "timezone": "auto", "forecast_days": 3},
-            timeout=15).json()
-    except (requests.RequestException, KeyError, IndexError, ValueError) as e:
-        return f"(weather lookup failed: {e})"
-
-    cur = wx["current"]
-    lines = [f"Weather for {loc['name']}, "
-             f"{loc.get('admin1', '')} {loc.get('country_code', '')}:",
-             f"Now: {cur['temperature_2m']}°F "
-             f"(feels {cur['apparent_temperature']}°F), "
-             f"{_WMO.get(cur['weather_code'], 'unknown')}, "
-             f"wind {cur['wind_speed_10m']} mph"]
-    d = wx["daily"]
-    for i, day in enumerate(d["time"]):
-        lines.append(f"{day}: {d['temperature_2m_min'][i]:.0f}–"
-                     f"{d['temperature_2m_max'][i]:.0f}°F, "
-                     f"{_WMO.get(d['weather_code'][i], '?')}, "
-                     f"precip {d['precipitation_probability_max'][i]}%")
-    return "\n".join(lines)
-
-# -------------------------------------------------------- tool: reminders
-
-def run_remind(arg: str, chat_id: int) -> str:
-    if "|" not in arg:
-        return ("(bad format — use: "
-                "<remind>YYYY-MM-DD HH:MM | message</remind>)")
-    when_s, message = (part.strip() for part in arg.split("|", 1))
-    try:
-        due = datetime.strptime(when_s, "%Y-%m-%d %H:%M")
-    except ValueError:
-        return f"(could not parse '{when_s}' — use YYYY-MM-DD HH:MM)"
-    if due <= datetime.now():
-        return f"(that time is in the past — it is now "\
-               f"{datetime.now().strftime('%Y-%m-%d %H:%M')})"
-    if not message:
-        return "(reminder needs a message after the |)"
-    reminders = load_json(REMINDERS_FILE, [])
-    reminders.append({"due": due.isoformat(timespec="minutes"),
-                      "message": message, "chat_id": chat_id})
-    save_json(REMINDERS_FILE, reminders)
-    log_event("reminder_set", due=reminders[-1]["due"], message=message)
-    return f"(reminder saved for {when_s}: {message})"
 
 # ----------------------------------------------------- tool: forget
 
@@ -400,140 +254,7 @@ def run_forget(arg: str, chat_id: int) -> str:
     return f"(removed from history: {removed.lstrip('- ').strip()})"
 
 
-# ------------------------------------------------------- tool: calc
-
-_CALC_FUNCS = {"sqrt": math.sqrt, "abs": abs, "round": round,
-               "floor": math.floor, "ceil": math.ceil,
-               "log": math.log, "log10": math.log10,
-               "log2": math.log2, "sin": math.sin, "cos": math.cos,
-               "tan": math.tan, "min": min, "max": max}
-_CALC_NAMES = {"pi": math.pi, "e": math.e}
-_CALC_OPS = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b,
-             ast.Mult: lambda a, b: a * b, ast.Div: lambda a, b: a / b,
-             ast.FloorDiv: lambda a, b: a // b,
-             ast.Mod: lambda a, b: a % b, ast.Pow: lambda a, b: a ** b}
-
-
-def _calc_eval(node):
-    """Whitelist-based AST walk — the safe alternative to eval().
-    Anything not explicitly allowed raises, including names,
-    attributes, subscripts, and comprehensions."""
-    if isinstance(node, ast.Expression):
-        return _calc_eval(node.body)
-    if isinstance(node, ast.Constant) and isinstance(node.value,
-                                                    (int, float)):
-        return node.value
-    if isinstance(node, ast.UnaryOp) and isinstance(
-            node.op, (ast.USub, ast.UAdd)):
-        v = _calc_eval(node.operand)
-        return -v if isinstance(node.op, ast.USub) else v
-    if isinstance(node, ast.BinOp) and type(node.op) in _CALC_OPS:
-        a, b = _calc_eval(node.left), _calc_eval(node.right)
-        if isinstance(node.op, ast.Pow) and abs(b) > 256:
-            raise ValueError("exponent too large")
-        return _CALC_OPS[type(node.op)](a, b)
-    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-            and node.func.id in _CALC_FUNCS and not node.keywords):
-        return _CALC_FUNCS[node.func.id](
-            *[_calc_eval(a) for a in node.args])
-    if isinstance(node, ast.Name) and node.id in _CALC_NAMES:
-        return _CALC_NAMES[node.id]
-    raise ValueError(f"unsupported: {type(node).__name__}")
-
-
-def run_calc(arg: str, chat_id: int) -> str:
-    expr = arg.strip().replace("^", "**")
-    try:
-        val = _calc_eval(ast.parse(expr, mode="eval"))
-    except (ValueError, TypeError, SyntaxError, ZeroDivisionError,
-            OverflowError) as e:
-        return f"(couldn't evaluate: {e})"
-    if isinstance(val, float):
-        val = int(val) if (val == int(val) and abs(val) < 1e15) \
-            else round(val, 10)
-    if isinstance(val, int) and len(str(val)) > 18:
-        return f"{arg.strip()} ≈ {float(val):.6e}"
-    return f"{arg.strip()} = {val}"
-
-
-# ------------------------------------------------------ tool: clock
-
-_TZ_ALIASES = {
-    "utc": "UTC", "gmt": "UTC",
-    "eastern": "America/New_York", "newyork": "America/New_York",
-    "nyc": "America/New_York", "central": "America/Chicago",
-    "chicago": "America/Chicago", "mountain": "America/Denver",
-    "denver": "America/Denver", "pacific": "America/Los_Angeles",
-    "losangeles": "America/Los_Angeles", "la": "America/Los_Angeles",
-    "anchorage": "America/Anchorage", "honolulu": "Pacific/Honolulu",
-    "toronto": "America/Toronto", "mexicocity": "America/Mexico_City",
-    "saopaulo": "America/Sao_Paulo", "london": "Europe/London",
-    "paris": "Europe/Paris", "berlin": "Europe/Berlin",
-    "madrid": "Europe/Madrid", "rome": "Europe/Rome",
-    "amsterdam": "Europe/Amsterdam", "athens": "Europe/Athens",
-    "istanbul": "Europe/Istanbul", "moscow": "Europe/Moscow",
-    "cairo": "Africa/Cairo", "johannesburg": "Africa/Johannesburg",
-    "dubai": "Asia/Dubai", "delhi": "Asia/Kolkata",
-    "mumbai": "Asia/Kolkata", "kolkata": "Asia/Kolkata",
-    "singapore": "Asia/Singapore", "hongkong": "Asia/Hong_Kong",
-    "shanghai": "Asia/Shanghai", "beijing": "Asia/Shanghai",
-    "seoul": "Asia/Seoul", "tokyo": "Asia/Tokyo",
-    "perth": "Australia/Perth", "sydney": "Australia/Sydney",
-    "auckland": "Pacific/Auckland",
-}
-
-
-def _resolve_tz(name: str):
-    raw = name.strip()
-    for candidate in (raw, _TZ_ALIASES.get(
-            re.sub(r"[\s_.-]", "", raw.lower()), "")):
-        if not candidate:
-            continue
-        try:
-            return ZoneInfo(candidate)
-        except Exception:
-            continue
-    return None
-
-
-CONVERT_RE = re.compile(
-    r"convert\s+(\d{1,2}):(\d{2})\s+(.+?)\s+to\s+(.+)", re.I)
-
-
-def run_clock(arg: str, chat_id: int) -> str:
-    arg = arg.strip()
-    m = CONVERT_RE.fullmatch(arg)
-    if m:
-        hh, mm, src_name, dst_name = (int(m.group(1)), int(m.group(2)),
-                                      m.group(3), m.group(4))
-        src_tz, dst_tz = _resolve_tz(src_name), _resolve_tz(dst_name)
-        if not src_tz or not dst_tz:
-            bad = src_name if not src_tz else dst_name
-            return (f"(unknown timezone '{bad.strip()}' — use IANA "
-                    f"names like Asia/Tokyo; on Windows, tzdata must "
-                    f"be installed)")
-        if not (0 <= hh <= 23 and 0 <= mm <= 59):
-            return "(invalid time — use 24h HH:MM)"
-        src_dt = datetime.now(src_tz).replace(hour=hh, minute=mm,
-                                              second=0, microsecond=0)
-        dst_dt = src_dt.astimezone(dst_tz)
-        return (f"{hh:02d}:{mm:02d} in {src_tz.key} = "
-                f"{dst_dt.strftime('%H:%M (%A)')} in {dst_tz.key}")
-    names = [n for n in re.split(r"[,;]+", arg) if n.strip()] or ["UTC"]
-    lines = [f"Local time here: "
-             f"{datetime.now().strftime('%H:%M (%A %Y-%m-%d)')}"]
-    for name in names[:8]:
-        tz = _resolve_tz(name)
-        if not tz:
-            lines.append(f"{name.strip()}: (unknown timezone — use "
-                         f"IANA names like Asia/Tokyo)")
-            continue
-        lines.append(f"{tz.key}: "
-                     f"{datetime.now(tz).strftime('%H:%M (%A %Y-%m-%d)')}")
-    return "\n".join(lines)
-
-
-# ------------------------------------------------------ tool: files
+# ---------------------------------- shared: workspace + file typing
 
 def _workspace_path(name: str):
     """Resolve a filename inside the workspace; refuse escapes.
@@ -578,145 +299,6 @@ def _sniff_ext(path: str) -> str:
     if head.startswith(b"%PDF"):
         return ".pdf"
     return ""
-
-
-def run_file(arg: str, chat_id: int) -> str:
-    os.makedirs(WORKSPACE_DIR, exist_ok=True)
-    verb, _, rest = arg.strip().partition(" ")
-    verb, rest = verb.lower(), rest.strip()
-
-    if verb == "list":
-        entries = sorted(os.listdir(WORKSPACE_DIR))
-        if not entries:
-            return "(workspace is empty)"
-        return "\n".join(
-            f"- {n} ({os.path.getsize(os.path.join(WORKSPACE_DIR, n))}"
-            f" bytes)" for n in entries)
-
-    if verb == "read":
-        path = _workspace_path(rest)
-        if not path or not os.path.isfile(path):
-            return f"(no such file in workspace: {rest})"
-        try:
-            with open(path, "r", encoding="utf-8",
-                      errors="replace") as f:
-                text = f.read(FETCH_MAX_CHARS + 1)
-        except OSError as e:
-            return f"(read failed: {e})"
-        if len(text) > FETCH_MAX_CHARS:
-            text = text[:FETCH_MAX_CHARS] + " …(truncated)"
-        return text or "(file is empty)"
-
-    if verb == "write":
-        name, _, content = rest.partition("|")
-        name, content = name.strip(), content.strip()
-        path = _workspace_path(name)
-        if not path:
-            return "(refused: path escapes the workspace)"
-        if not content:
-            return "(nothing to write — use: write name.txt | content)"
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content + "\n")
-        except OSError as e:
-            return f"(write failed: {e})"
-        return f"(wrote {name}, {len(content)} chars)"
-
-    if verb == "send":
-        name, _, caption = rest.partition("|")
-        name, caption = name.strip(), caption.strip()
-        path = _workspace_path(name)
-        if not path or not os.path.isfile(path):
-            return f"(no such file in workspace: {name})"
-        size = os.path.getsize(path)
-        if size > 50_000_000:
-            return "(file exceeds Telegram's 50 MB bot limit)"
-        if chat_id == WEB_CHAT_ID:
-            return (f"(files can't be pushed into the web chat — give "
-                    f"the user this link to open it: "
-                    f"http://{DASHBOARD_HOST}:{DASHBOARD_PORT}"
-                    f"/workspace/{quote(name)} )")
-        ext = os.path.splitext(name)[1].lower()
-        if not ext:
-            # Repair a missing extension from the file's own bytes, so
-            # it routes correctly AND arrives openable.
-            sniffed = _sniff_ext(path)
-            if sniffed:
-                fixed = _workspace_path(name + sniffed)
-                try:
-                    if fixed and not os.path.exists(fixed):
-                        os.rename(path, fixed)
-                        path, name, ext = fixed, name + sniffed, sniffed
-                except OSError:
-                    ext = sniffed   # send it anyway, just don't rename
-        photo_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-        audio_exts = {".mp3", ".m4a", ".ogg", ".oga", ".wav", ".flac"}
-        try:
-            if ext in photo_exts and size <= 10_000_000:
-                try:
-                    tg_upload("sendPhoto", chat_id, "photo", path,
-                              caption)
-                except requests.RequestException:
-                    # Telegram rejects some photos (odd dimensions or
-                    # formats) — retry uncompressed as a document.
-                    tg_upload("sendDocument", chat_id, "document",
-                              path, caption)
-            elif ext in audio_exts:
-                tg_upload("sendAudio", chat_id, "audio", path, caption)
-            else:
-                tg_upload("sendDocument", chat_id, "document", path,
-                          caption)
-        except requests.RequestException as e:
-            return f"(send failed: {e.__class__.__name__})"
-        log_event("file_sent", name=name, bytes=size, chat_id=chat_id)
-        return f"(sent {name} to the chat — {size} bytes)"
-
-    if verb == "download":
-        url, _, name = rest.partition("|")
-        url, name = url.strip(), name.strip()
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return "(download refused: only http/https URLs)"
-        if not parsed.hostname or _is_private_host(parsed.hostname):
-            return "(download refused: host is private/unresolvable)"
-        try:
-            r = requests.get(url, timeout=30, stream=True, headers={
-                "User-Agent": "Mozilla/5.0 (BarrelShell agent)"})
-            r.raise_for_status()
-        except requests.RequestException as e:
-            return f"(download failed: {e})"
-        if not name:
-            name = os.path.basename(unquote(parsed.path)) or "download"
-        if not os.path.splitext(name)[1]:
-            # No extension given — take it from the URL, else from the
-            # server's content-type. A file named "fox_picture" is
-            # useless to every program that opens it later.
-            ext = os.path.splitext(unquote(parsed.path))[1]
-            if not ext:
-                ctype = r.headers.get("content-type", "").split(";")[0]
-                ext = mimetypes.guess_extension(ctype.strip()) or ""
-                ext = {".jpe": ".jpg", ".jpeg": ".jpg"}.get(ext, ext)
-            name += ext or ".bin"
-        path = _workspace_path(name)
-        if not path:
-            return "(refused: filename escapes the workspace)"
-        try:
-            size = 0
-            with open(path, "wb") as f:
-                for chunk in r.iter_content(65536):
-                    size += len(chunk)
-                    if size > DOWNLOAD_MAX_BYTES:
-                        f.close()
-                        os.remove(path)
-                        return "(download refused: exceeds size cap)"
-                    f.write(chunk)
-        except requests.RequestException as e:
-            return f"(download failed: {e})"
-        return f"(downloaded {name}, {size} bytes)"
-
-    return ("(unknown file command — use: list | read <name> | "
-            "write <name> | <content> | download <url> | <name>)")
-
 
 # ----------------------------------------- tool: pulse (propose only)
 
@@ -826,25 +408,9 @@ def run_status(arg: str, chat_id: int) -> str:
 
 # --------------------------------------------------------- tool registry
 
-TOOLS = {
-    "search": {
-        "handler": run_search,
-        "desc": "Search the web for current events or anything that may "
-                "have changed since your training. Emit "
-                "<search>concise query</search>",
-    },
-    "fetch": {
-        "handler": run_fetch,
-        "desc": "Read the full text of one web page — use when search "
-                "snippets aren't enough, on a URL from results or from "
-                "the user. Emit <fetch>https://full.url/here</fetch>",
-    },
-    "weather": {
-        "handler": run_weather,
-        "desc": "Get current conditions and a 3-day forecast for a "
-                "city name or US ZIP code. Emit "
-                "<weather>city or place name</weather>",
-    },
+TOOLS: dict = {
+    # Core-native tools. Everything else is loaded from bundled/ and
+    # skills/ at startup — see load_skills() at the bottom of the file.
     "forget": {
         "handler": run_forget,
         "desc": "Remove ONE outdated or wrong fact from your saved "
@@ -852,34 +418,6 @@ TOOLS = {
                 "something you have saved. Give a distinctive phrase "
                 "from that entry; if several match you'll get a list "
                 "to narrow. Emit <forget>distinctive phrase</forget>",
-    },
-    "calc": {
-        "handler": run_calc,
-        "desc": "Do precise arithmetic — never compute multi-step "
-                "math in your head. Supports + - * / ** % (), and "
-                "sqrt, log, sin, cos, round, floor, ceil, min, max, "
-                "abs, pi, e. Emit <calc>(17.5*12)/0.85</calc>",
-    },
-    "clock": {
-        "handler": run_clock,
-        "desc": "Current time in other timezones, or convert a time "
-                "between zones. Emit <clock>tokyo</clock>, "
-                "<clock>Asia/Tokyo, Europe/London</clock>, or "
-                "<clock>convert 09:00 America/New_York to "
-                "Asia/Tokyo</clock>",
-    },
-    "file": {
-        "handler": run_file,
-        "desc": "Work with files in your workspace folder (the ONLY "
-                "folder you can access). Grammar: <file>list</file>, "
-                "<file>read notes.txt</file>, "
-                "<file>write notes.txt | the content</file>, "
-                "<file>download https://url | saved-name.pdf</file> "
-                "(always give the saved name a matching file "
-                "extension), "
-                "<file>send name.jpg | optional caption</file> to "
-                "deliver a workspace file (image/audio/any) to the "
-                "user in Telegram",
     },
     "pulse": {
         "handler": run_pulse,
@@ -899,55 +437,54 @@ TOOLS = {
                 "capabilities, or your usage. Emit "
                 "<status>report</status>",
     },
-    "remind": {
-        "handler": run_remind,
-        "desc": "Set a one-time reminder. Convert the user's request to "
-                "an absolute time using the current date/time you were "
-                "given. Emit <remind>YYYY-MM-DD HH:MM | message</remind>",
-    },
 }
 
-def load_skills() -> None:
-    """Merge drop-in skills from skills/*.py into the registry.
-    Contract per file:  SKILL = {"name", "desc", "handler"}  where
-    handler(arg, chat_id) -> str and name is the (lowercase) tag.
-    A user skill may override a built-in — loudly. SKILLS ARE CODE:
-    they execute with the bot's full permissions at load time; read
-    anything you didn't write before dropping it in this folder."""
-    if not os.path.isdir(SKILLS_DIR):
+BUNDLED_DIR = "bundled"
+
+
+def _load_skill_dir(folder: str) -> None:
+    if not os.path.isdir(folder):
         return
     import importlib.util
-    for fname in sorted(os.listdir(SKILLS_DIR)):
+    for fname in sorted(os.listdir(folder)):
         if not fname.endswith(".py") or fname.startswith("_"):
             continue
-        path = os.path.join(SKILLS_DIR, fname)
+        path = os.path.join(folder, fname)
         try:
             spec = importlib.util.spec_from_file_location(
-                f"barrel_skill_{fname[:-3]}", path)
+                f"barrel_skill_{folder}_{fname[:-3]}", path)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
         except Exception as e:
-            print(f"skills: FAILED to load {fname}: {e!r}")
+            print(f"skills: FAILED to load {folder}/{fname}: {e!r}")
             continue
         skill = getattr(mod, "SKILL", None)
         name = str((skill or {}).get("name", ""))
         if not (isinstance(skill, dict) and skill.get("desc")
                 and callable(skill.get("handler"))
                 and re.fullmatch(r"[a-z0-9_]+", name)):
-            print(f"skills: {fname} skipped — needs SKILL dict with "
-                  f"lowercase name, desc, handler(arg, chat_id)")
+            print(f"skills: {folder}/{fname} skipped — needs SKILL dict "
+                  f"with lowercase name, desc, handler(arg, chat_id)")
             continue
         if name in TOOLS:
-            print(f"skills: '{name}' from {fname} OVERRIDES a built-in")
+            print(f"skills: '{name}' from {folder}/{fname} OVERRIDES an "
+                  f"existing tool")
         TOOLS[name] = {"handler": skill["handler"],
                        "desc": str(skill["desc"])}
-        print(f"skills: loaded '{name}' from {fname}")
+        print(f"skills: loaded '{name}' from {folder}/{fname}")
 
 
-load_skills()
-# Compiled AFTER skills load, so drop-in tags are recognized.
-TOOL_RE = re.compile(
-    rf"<({'|'.join(map(re.escape, TOOLS))})>(.*?)</\1>", re.DOTALL)
+def load_skills() -> None:
+    """Merge drop-in skills into the registry. bundled/ ships with
+    BarrelShell and updates freely; skills/ is yours and is never
+    touched by updates. skills/ loads last, so a same-named user skill
+    OVERRIDES a bundled one — that's how you swap, say, DuckDuckGo
+    search for your own. SKILLS ARE CODE: they run with the Barrel's
+    full permissions at load time; read anything you didn't write."""
+    _load_skill_dir(BUNDLED_DIR)
+    _load_skill_dir(SKILLS_DIR)
+
+
 REMEMBER_RE = re.compile(r"<remember>(.*?)</remember>", re.DOTALL)
 
 
@@ -1832,6 +1369,15 @@ def main() -> None:
                                  "on my end — details are in the log.")
                 except requests.RequestException:
                     pass
+
+
+# Skills load LAST, after every core function (deliver, tg_upload,
+# _workspace_path, ...) exists — bundled skills import this module, so
+# the module must be fully defined first. TOOL_RE is compiled after,
+# so freshly loaded tags are recognized.
+load_skills()
+TOOL_RE = re.compile(
+    rf"<({'|'.join(map(re.escape, TOOLS))})>(.*?)</\1>", re.DOTALL)
 
 
 if __name__ == "__main__":
