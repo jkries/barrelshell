@@ -599,6 +599,20 @@ def save_history(reply: str) -> tuple[str, int]:
     return REMEMBER_RE.sub("", reply).strip(), len(facts)
 
 
+def save_fact(fact: str) -> None:
+    """Write one fact to history directly, without the model's help.
+    The last-resort path when the user clearly asked to be remembered
+    but the model won't emit a <remember> tag even after a nudge —
+    small models sometimes just won't. Code guarantees what the prompt
+    couldn't."""
+    fact = fact.strip()
+    if not fact:
+        return
+    with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+        f.write(f"- [{date.today().isoformat()}] {fact}\n")
+    log_event("history_saved", facts=[fact], deterministic=True)
+
+
 conversations: dict[int, list[dict]] = {}
 agent_lock = threading.Lock()
 
@@ -672,29 +686,40 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
                     # silent or leaking a placeholder.
                     stripped = ("Got it — I've saved that and will "
                                 "remember it in future conversations.")
-                if (not total_saved and not nudged_save
-                        and kind != "pulse"
+                if (not total_saved and kind != "pulse"
                         and SAVE_REQUEST_RE.search(user_text)):
-                    # The user explicitly asked to be remembered and no
-                    # <remember> tag was emitted. Unlike tools, the tag
-                    # returns no result, so nothing would otherwise
-                    # contradict a "sure, noted!" that saved nothing.
-                    nudged_save = True
-                    trace(chat_id, "\u26a0 you asked me to remember "
-                                   "something but no <remember> tag "
-                                   "was emitted — nudging the model")
-                    log_event("save_nudge", chat_id=chat_id,
+                    if not nudged_save:
+                        # First: ask the model to emit the tag itself.
+                        # The <remember> tag returns no result, so
+                        # nothing otherwise contradicts a "sure, noted!"
+                        # that saved nothing.
+                        nudged_save = True
+                        trace(chat_id, "\u26a0 you asked me to remember "
+                                       "something but no <remember> tag "
+                                       "was emitted — nudging the model")
+                        log_event("save_nudge", chat_id=chat_id,
+                                  text=user_text[:200])
+                        convo.append({"role": "user", "content":
+                                      "(System: you did not emit a "
+                                      "<remember> tag, so nothing was "
+                                      "saved. If I asked you to remember "
+                                      "a durable fact, reply again now "
+                                      "with a <remember>fact</remember> "
+                                      "tag alongside your reply. If I "
+                                      "was not asking you to save "
+                                      "anything, just reply normally.)"})
+                        continue
+                    # Nudged once and STILL no tag — the model won't do
+                    # it, so stop asking and save it in code. Better a
+                    # verbatim record than a false "I'll remember that".
+                    save_fact(user_text.strip())
+                    total_saved += 1
+                    stats["facts_saved"] += 1
+                    trace(chat_id, "\U0001f4be model wouldn't emit the "
+                                   "tag — saved the request verbatim in "
+                                   "code")
+                    log_event("save_forced", chat_id=chat_id,
                               text=user_text[:200])
-                    convo.append({"role": "user", "content":
-                                  "(System: you did not emit a "
-                                  "<remember> tag, so nothing was "
-                                  "saved. If I asked you to remember a "
-                                  "durable fact, reply again now with "
-                                  "the <remember>fact</remember> tag "
-                                  "included alongside your reply. If I "
-                                  "was not asking you to save "
-                                  "anything, just reply normally.)"})
-                    continue
                 if not stripped and not retried_empty:
                     # One silent retry: nudge the model instead of
                     # shrugging at the user.
