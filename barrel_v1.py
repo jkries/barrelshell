@@ -476,7 +476,8 @@ def _load_skill_dir(folder: str) -> None:
             print(f"skills: '{name}' from {folder}/{fname} OVERRIDES an "
                   f"existing tool")
         TOOLS[name] = {"handler": skill["handler"],
-                       "desc": str(skill["desc"])}
+                       "desc": str(skill["desc"]),
+                       "origin": f"{folder}/{fname}"}
         print(f"skills: loaded '{name}' from {folder}/{fname}")
 
 
@@ -490,6 +491,17 @@ def load_skills() -> None:
     _load_skill_dir(BUNDLED_DIR)
     _load_skill_dir(SKILLS_DIR)
 
+
+# Phrases that mean "commit this to your history". Deliberately
+# narrow: it only has to catch explicit asks, since a missed nudge is
+# recoverable but a spurious one wastes a round.
+SAVE_REQUEST_RE = re.compile(
+    r"\b(?:please\s+)?(?:remember|memorize|memorise)\s+(?:that\s+|this\b|i\b|my\b|im\b)"
+    r"|\bdon'?t\s+forget\s+(?:that\s+|i\b|my\b)"
+    r"|\b(?:make\s+a\s+)?note\s+(?:that|this|it)\b"
+    r"|\b(?:add|save|store|keep)\s+(?:that|this)\s+(?:to|in)\s+(?:your\s+)?(?:history|memory|notes)\b"
+    r"|\bkeep\s+(?:that|this)\s+in\s+mind\b",
+    re.IGNORECASE)
 
 REMEMBER_RE = re.compile(r"<remember>(.*?)</remember>", re.DOTALL)
 
@@ -513,12 +525,22 @@ def build_protocol() -> str:
         "You cannot see or receive images in this configuration.")
     return f"""\
 ## History protocol
-You keep a persistent history of durable facts, shown under "Your history". To save a
-durable fact, emit: <remember>one-line fact</remember>
+You keep a persistent history of durable facts, shown under "Your
+history" below. To save a durable fact, emit:
+<remember>one-line fact</remember>
 Only durable facts, phrased to make sense out of context. Always
 include a normal reply to the user in the same message — never send
 the tag alone. Confirm naturally that you'll remember it, without
 mentioning the tag mechanism.
+
+Emitting the tag is the ONLY way to save anything. Writing "I'll note
+that down" or "I'll remember that" saves nothing — if you intend to
+remember something, the tag must be in the same message.
+
+The "Your history" section below is the complete and current record of
+everything you have saved. If a fact is not listed there, you did not
+save it. When asked whether you saved something, check that list and
+answer from it — never assume you did.
 
 ## Tools
 {tool_lines}
@@ -612,6 +634,7 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
 
         seen_calls: set[tuple] = set()
         total_saved = 0
+        nudged_save = False
         turn_in = turn_out = 0
         retried_empty = False
         final_reply = "(no reply)"
@@ -634,6 +657,9 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
             log_event("model_reply", chat_id=chat_id, round=_round,
                       raw=raw, tokens_in=t_in, tokens_out=t_out)
             reply, n_saved = save_history(raw)
+            if n_saved:
+                trace(chat_id, f"\U0001f4be saved {n_saved} fact"
+                               f"{'' if n_saved == 1 else 's'} to history")
             total_saved += n_saved
             stats["facts_saved"] += n_saved
 
@@ -646,10 +672,34 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
                     # silent or leaking a placeholder.
                     stripped = ("Got it — I've saved that and will "
                                 "remember it in future conversations.")
+                if (not total_saved and not nudged_save
+                        and kind != "pulse"
+                        and SAVE_REQUEST_RE.search(user_text)):
+                    # The user explicitly asked to be remembered and no
+                    # <remember> tag was emitted. Unlike tools, the tag
+                    # returns no result, so nothing would otherwise
+                    # contradict a "sure, noted!" that saved nothing.
+                    nudged_save = True
+                    trace(chat_id, "\u26a0 you asked me to remember "
+                                   "something but no <remember> tag "
+                                   "was emitted — nudging the model")
+                    log_event("save_nudge", chat_id=chat_id,
+                              text=user_text[:200])
+                    convo.append({"role": "user", "content":
+                                  "(System: you did not emit a "
+                                  "<remember> tag, so nothing was "
+                                  "saved. If I asked you to remember a "
+                                  "durable fact, reply again now with "
+                                  "the <remember>fact</remember> tag "
+                                  "included alongside your reply. If I "
+                                  "was not asking you to save "
+                                  "anything, just reply normally.)"})
+                    continue
                 if not stripped and not retried_empty:
                     # One silent retry: nudge the model instead of
                     # shrugging at the user.
                     retried_empty = True
+                    trace(chat_id, "\u26a0 empty reply — retrying")
                     log_event("empty_reply_retry", chat_id=chat_id,
                               round=_round)
                     convo.append({"role": "user", "content":
@@ -661,6 +711,9 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
                 stats["last_reply"] = final_reply[:300]
                 stats["last_turn_tokens"] = {"in": turn_in,
                                              "out": turn_out}
+                trace(chat_id, f"\u2705 turn finished in {_round + 1} "
+                               f"round{'' if _round == 0 else 's'} — "
+                               f"{turn_in} tokens in / {turn_out} out")
                 convo.append({"role": "assistant",
                                 "content": final_reply})
                 log_event("final_reply", chat_id=chat_id,
@@ -679,7 +732,15 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
 
             stats["tools"][tool] = stats["tools"].get(tool, 0) + 1
             on_status(f"{tool}: {arg}")
+            origin = TOOLS[tool].get("origin", "core")
+            trace(chat_id, f"\U0001f527 round {_round + 1} — {tool} "
+                           f"({origin})\n{arg[:TRACE_PREVIEW]}")
+            t0 = time.monotonic()
             result = TOOLS[tool]["handler"](arg, chat_id)
+            trace(chat_id, f"\u2514\u2500 {tool} returned "
+                           f"{len(result)} chars in "
+                           f"{time.monotonic() - t0:.1f}s\n"
+                           f"{result[:TRACE_PREVIEW]}")
             log_event("tool_call", tool=tool, arg=arg,
                       result_chars=len(result))
             convo.append({"role": "user", "content":
@@ -903,6 +964,7 @@ def gather_status() -> dict:
         "uptime": str(now - START_TIME).split(".")[0],
         "model": MODEL,
         "vision_model": VISION_MODEL or "disabled",
+        "trace_chats": sorted(trace_chats),
         "num_ctx": NUM_CTX,
         "skills": sorted(TOOLS),
         "stats": {**stats, "tools": dict(stats["tools"])},
@@ -1055,6 +1117,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                        "application/json", 500)
             return
         web_post("me", label)
+        while web_trace_buffer:
+            web_post("bot", web_trace_buffer.pop(0), "trace")
         last_id = web_post("bot", reply)
         self._send(json.dumps({"reply": reply,
                                "last_id": last_id}).encode(),
@@ -1087,12 +1151,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # can reach this endpoint already has your machine. No auth.
         log_event("web_msg", text=message[:300])
         try:
-            cmd_reply = handle_command(message)
+            cmd_reply = handle_command(message, WEB_CHAT_ID)
             reply = (cmd_reply if cmd_reply is not None
                      else handle_turn(WEB_CHAT_ID, message, kind="web"))
         except Exception as e:
             log_event("web_chat_error", error=repr(e))
             web_post("me", message)
+            while web_trace_buffer:
+                web_post("bot", web_trace_buffer.pop(0), "trace")
             self._send(json.dumps({"error": repr(e)}).encode(),
                        "application/json", 500)
             return
@@ -1100,6 +1166,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # Recording the user's message up front let the dashboard's
         # poller see it mid-generation and draw it a second time.
         web_post("me", message)
+        while web_trace_buffer:
+            web_post("bot", web_trace_buffer.pop(0), "trace")
         last_id = web_post("bot", reply)
         self._send(json.dumps({"reply": reply,
                                "last_id": last_id}).encode(),
@@ -1218,6 +1286,31 @@ def web_post(role: str, text: str, kind: str = "chat") -> int:
         del web_outbox[:-WEB_OUTBOX_MAX]
     save_web_state()
     return msg_id
+
+
+# --------------------------------------------------------- trace mode
+
+trace_chats: set = set()        # chat ids with /trace switched on
+web_trace_buffer: list = []     # web lines, flushed in order by /chat
+TRACE_PREVIEW = 220
+
+
+def trace(chat_id: int, text: str) -> None:
+    """Echo what the machinery is doing, for whoever asked to see it.
+    Off by default and per-chat, so tracing on the dashboard never
+    spams Telegram."""
+    if chat_id not in trace_chats:
+        return
+    line = text if len(text) <= 900 else text[:900] + " …"
+    if chat_id == WEB_CHAT_ID:
+        # Buffered: the web transcript is written after the turn ends,
+        # so posting now would order these before the user's message.
+        web_trace_buffer.append(line)
+    else:
+        try:
+            deliver(chat_id, line, "trace")
+        except Exception as e:
+            print(f"trace send failed: {e!r}")
 
 
 def deliver(chat_id: int, text: str, kind: str = "chat") -> None:
@@ -1360,12 +1453,27 @@ PREFIX_COMMANDS = {
 }
 
 
-def handle_command(text: str):
+def toggle_trace(chat_id: int) -> str:
+    if chat_id in trace_chats:
+        trace_chats.discard(chat_id)
+        return ("Trace off. (This is a debugging view of tool calls — "
+                "it does not affect the model itself.)")
+    trace_chats.add(chat_id)
+    return ("Trace on — I'll show each skill as it fires, what it "
+            "returned, and the round/token count. /trace again to "
+            "turn it off. Nothing is being trained; this is just a "
+            "window into the machinery.")
+
+
+def handle_command(text: str, chat_id: int = 0):
     """Deterministic user commands, shared by Telegram and web chat.
     These run in CODE — the model can neither invoke nor fake them,
     which is exactly what makes /approve a human-in-the-loop gate.
     Returns reply text, or None if the message is not a command."""
     text = text.strip()
+    # /train is an alias people reach for; it does NOT train anything.
+    if text in ("/trace", "/train", "/debug"):
+        return toggle_trace(chat_id)
     if text in COMMANDS:
         return COMMANDS[text]()
     for prefix, fn in PREFIX_COMMANDS.items():
@@ -1455,7 +1563,7 @@ def main() -> None:
             # the same message gets redelivered on restart — an
             # infinite crash loop. Contain it, log it, move on.
             try:
-                cmd_reply = handle_command(msg["text"])
+                cmd_reply = handle_command(msg["text"], chat_id)
                 if cmd_reply is not None:
                     send_message(chat_id, cmd_reply)
                     continue

@@ -419,6 +419,14 @@ you don't need to touch Task Scheduler — just end the python process
 in Task Manager, and the loop relaunches it with your changes five
 seconds later.
 
+**Seeing what your Barrel is doing.** Send `/trace` in any chat to
+switch on a live debugging view: each skill as it fires, which file it
+came from, a preview of what it returned, and a round/token summary at
+the end. `/trace` again turns it off. It's per-chat and off by
+default, so tracing in the dashboard won't spam Telegram. (`/train`
+and `/debug` are aliases — nothing is being trained; this only shows
+what the machinery is doing.)
+
 **Dashboard.** `http://127.0.0.1:8787` on the host machine shows live
 runtime info: status/uptime, configured model and context size, what
 Ollama actually has loaded (and how much VRAM it's using — a quick
