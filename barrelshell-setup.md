@@ -427,6 +427,17 @@ default, so tracing in the dashboard won't spam Telegram. (`/train`
 and `/debug` are aliases — nothing is being trained; this only shows
 what the machinery is doing.)
 
+**Applying changes without a restart.** Send `/reload` to re-read
+config.json and rescan bundled/ and skills/ — new or edited skill
+files show up immediately, deleted ones disappear, and most config
+values (model, num_ctx, max_tool_rounds, vision_model, and the rest
+except dashboard_host/dashboard_port) apply live. The reply tells you
+exactly what changed and names anything that still needs a restart.
+Send `/restart` to restart the whole process in place — it sends a
+goodbye first and, on Telegram, acknowledges the update that
+triggered it so the restart command itself is never redelivered and
+re-triggered on boot.
+
 **Dashboard.** `http://127.0.0.1:8787` on the host machine shows live
 runtime info: status/uptime, configured model and context size, what
 Ollama actually has loaded (and how much VRAM it's using — a quick

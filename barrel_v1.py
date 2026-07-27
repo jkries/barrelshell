@@ -135,6 +135,7 @@ PULSE_CHAT_ID = int(os.environ.get(
     next(iter(ALLOWED_IDS), WEB_CHAT_ID) if TELEGRAM_ENABLED
     else WEB_CHAT_ID))
 API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+tg_offset: int = 0   # module-level so /restart can ack it before exec
 
 # Dashboard binds to localhost by default (config: dashboard_host) —
 # it displays private conversation content and has no login. Binding
@@ -448,7 +449,7 @@ TOOLS: dict = {
 BUNDLED_DIR = "bundled"
 
 
-def _load_skill_dir(folder: str) -> None:
+def _load_skill_dir(folder: str, target: dict) -> None:
     if not os.path.isdir(folder):
         return
     import importlib.util
@@ -472,13 +473,38 @@ def _load_skill_dir(folder: str) -> None:
             print(f"skills: {folder}/{fname} skipped — needs SKILL dict "
                   f"with lowercase name, desc, handler(arg, chat_id)")
             continue
-        if name in TOOLS:
+        if name in target:
             print(f"skills: '{name}' from {folder}/{fname} OVERRIDES an "
                   f"existing tool")
-        TOOLS[name] = {"handler": skill["handler"],
-                       "desc": str(skill["desc"]),
-                       "origin": f"{folder}/{fname}"}
+        target[name] = {"handler": skill["handler"],
+                        "desc": str(skill["desc"]),
+                        "origin": f"{folder}/{fname}"}
         print(f"skills: loaded '{name}' from {folder}/{fname}")
+
+
+def _rebuild_tools() -> tuple[dict, list]:
+    """Build a fresh registry from the core-native tools plus a rescan
+    of bundled/ and skills/, WITHOUT touching the live TOOLS dict —
+    the caller decides whether to swap it in. Rebuilding from scratch
+    (not merging) is what makes a deleted skill actually disappear on
+    reload rather than lingering. If a folder has vanished (renamed
+    mid-edit, a mount not ready yet), carry over what was previously
+    loaded from it instead of silently losing that capability."""
+    warnings = []
+    new_tools = {name: TOOLS[name] for name in ("forget", "pulse", "status")}
+    for folder in (BUNDLED_DIR, SKILLS_DIR):
+        if os.path.isdir(folder):
+            _load_skill_dir(folder, new_tools)
+        else:
+            carried = {n: t for n, t in TOOLS.items()
+                      if t.get("origin", "").startswith(folder + "/")}
+            if carried:
+                warnings.append(f"{folder}/ not found — kept "
+                                f"{len(carried)} previously loaded "
+                                f"skill(s) from it rather than "
+                                f"dropping them")
+                new_tools.update(carried)
+    return new_tools, warnings
 
 
 def load_skills() -> None:
@@ -488,8 +514,8 @@ def load_skills() -> None:
     OVERRIDES a bundled one — that's how you swap, say, DuckDuckGo
     search for your own. SKILLS ARE CODE: they run with the Barrel's
     full permissions at load time; read anything you didn't write."""
-    _load_skill_dir(BUNDLED_DIR)
-    _load_skill_dir(SKILLS_DIR)
+    _load_skill_dir(BUNDLED_DIR, TOOLS)
+    _load_skill_dir(SKILLS_DIR, TOOLS)
 
 
 # Phrases that mean "commit this to your history". Deliberately
@@ -1478,6 +1504,103 @@ PREFIX_COMMANDS = {
 }
 
 
+# Config keys that can change without a restart, and the global each
+# one feeds — the same names assigned once at import, from _cfg.
+_RELOADABLE_CONFIG = [
+    ("model", "MODEL", str),
+    ("num_ctx", "NUM_CTX", int),
+    ("max_tool_rounds", "MAX_TOOL_ROUNDS", int),
+    ("max_turns", "MAX_TURNS", int),
+    ("search_results", "SEARCH_RESULTS", int),
+    ("fetch_max_chars", "FETCH_MAX_CHARS", int),
+    ("download_max_bytes", "DOWNLOAD_MAX_BYTES", int),
+    ("pulse_check_seconds", "PULSE_CHECK_SECONDS", int),
+    ("workspace_dir", "WORKSPACE_DIR", str),
+    ("vision_model", "VISION_MODEL", lambda v: str(v).strip()),
+    ("dashboard_token", "DASHBOARD_TOKEN", lambda v: str(v).strip()),
+]
+# Bound at process start (the socket is already listening) — these
+# are reported, never applied, so /reload never lies about them.
+_FROZEN_CONFIG = ["dashboard_host", "dashboard_port"]
+
+
+def reload_all(chat_id: int = 0) -> str:
+    """Re-read config.json and rescan bundled/ + skills/, without a
+    restart. Config values that are only used at bind time (the
+    dashboard's host/port) can't take effect this way — those are
+    named in the reply so /reload never claims more than it did."""
+    global _cfg, TOOL_RE
+    lines = []
+
+    new_cfg = _load_config()
+    changed = []
+    for key, varname, cast in _RELOADABLE_CONFIG:
+        try:
+            new_val = cast(new_cfg[key])
+        except (TypeError, ValueError):
+            continue
+        if globals().get(varname) != new_val:
+            changed.append(key)
+            globals()[varname] = new_val
+    frozen_changed = [k for k in _FROZEN_CONFIG
+                      if new_cfg.get(k) != _cfg.get(k)]
+    _cfg = new_cfg
+    lines.append(f"Config applied live: {', '.join(changed)}"
+                if changed else "Config: no changes to apply")
+    if frozen_changed:
+        lines.append(f"Needs /restart to take effect: "
+                     f"{', '.join(frozen_changed)}")
+
+    with agent_lock:
+        new_tools, warnings = _rebuild_tools()
+        old_names, new_names = set(TOOLS), set(new_tools)
+        TOOLS.clear()
+        TOOLS.update(new_tools)
+        TOOL_RE = re.compile(
+            rf"<({'|'.join(map(re.escape, TOOLS))})>(.*?)</\1>", re.DOTALL)
+
+    added = sorted(new_names - old_names)
+    removed = sorted(old_names - new_names)
+    skill_line = f"Skills: {len(new_names)} loaded"
+    if added:
+        skill_line += f" — added: {', '.join(added)}"
+    if removed:
+        skill_line += f" — removed: {', '.join(removed)}"
+    lines.append(skill_line)
+    lines.extend(f"\u26a0 {w}" for w in warnings)
+
+    log_event("reload", chat_id=chat_id, added=added, removed=removed,
+              config_changed=changed)
+    return "\n".join(lines)
+
+
+def restart_barrel(chat_id: int) -> str:
+    """Deterministic restart via re-exec — same interpreter, same
+    argv, fresh process. Only reachable from a user-typed command, the
+    same trust boundary as /approve. Ordering matters: the goodbye
+    must send and Telegram's offset must be acked BEFORE exec, or the
+    triggering message gets redelivered as a poison message that
+    restarts the Barrel forever — the same failure class fixed for
+    ordinary turn errors, at process-boundary scale."""
+    try:
+        deliver(chat_id, "\U0001f504 Restarting now — back in a "
+                         "few seconds.")
+    except Exception:
+        pass
+    if TELEGRAM_ENABLED:
+        try:
+            tg("getUpdates", offset=tg_offset, timeout=1)
+        except requests.RequestException:
+            pass
+    save_web_state()
+    log_event("restart", chat_id=chat_id)
+    try:
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    except OSError as e:
+        return f"Restart failed: {e}"
+    return ""  # unreachable if execv succeeds — the process is gone
+
+
 def toggle_trace(chat_id: int) -> str:
     if chat_id in trace_chats:
         trace_chats.discard(chat_id)
@@ -1499,6 +1622,10 @@ def handle_command(text: str, chat_id: int = 0):
     # /train is an alias people reach for; it does NOT train anything.
     if text in ("/trace", "/train", "/debug"):
         return toggle_trace(chat_id)
+    if text == "/reload":
+        return reload_all(chat_id)
+    if text == "/restart":
+        return restart_barrel(chat_id)
     if text in COMMANDS:
         return COMMANDS[text]()
     for prefix, fn in PREFIX_COMMANDS.items():
@@ -1538,17 +1665,17 @@ def main() -> None:
             return
 
     print("BarrelShell — Barrel started, Telegram polling")
-    offset = 0
+    global tg_offset
     while True:
         try:
-            updates = tg("getUpdates", offset=offset, timeout=60)
+            updates = tg("getUpdates", offset=tg_offset, timeout=60)
         except requests.RequestException as e:
             print(f"poll error, retrying: {e}")
             time.sleep(5)
             continue
 
         for update in updates.get("result", []):
-            offset = update["update_id"] + 1
+            tg_offset = update["update_id"] + 1
             msg = update.get("message")
             if not msg:
                 continue
