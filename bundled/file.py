@@ -16,20 +16,73 @@ import requests
 import barrel_v1 as core
 
 
+def _rel(name: str) -> str:
+    """Normalise a user/model-supplied name to a workspace-relative
+    one. Models often write a leading slash; treat that as the
+    workspace root rather than the filesystem root, consistently
+    across every verb. '..' is NOT handled here — core._workspace_path
+    still refuses it, which is what keeps the sandbox closed."""
+    return name.strip().lstrip("/\\").strip()
+
+
+def _ensure_parent(path: str) -> bool:
+    """Create the folder a file is about to live in. Safe because the
+    path came from core._workspace_path, which already refused
+    anything outside the workspace."""
+    parent = os.path.dirname(path)
+    if not parent:
+        return True
+    try:
+        os.makedirs(parent, exist_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def _walk_workspace(root: str, rel: str = "") -> list:
+    """Depth-first listing, folders marked with a trailing slash."""
+    out = []
+    try:
+        entries = sorted(os.scandir(root), key=lambda e: (not e.is_dir(),
+                                                          e.name.lower()))
+    except OSError:
+        return out
+    for e in entries:
+        shown = f"{rel}{e.name}"
+        if e.is_dir():
+            out.append(f"- {shown}/")
+            out.extend(_walk_workspace(e.path, shown + "/"))
+        else:
+            try:
+                size = e.stat().st_size
+            except OSError:
+                size = 0
+            out.append(f"- {shown} ({size} bytes)")
+        if len(out) >= 200:
+            out.append("- …(more entries not shown)")
+            break
+    return out
+
+
 def file(arg: str, chat_id: int) -> str:
     os.makedirs(core.WORKSPACE_DIR, exist_ok=True)
     verb, _, rest = arg.strip().partition(" ")
     verb, rest = verb.lower(), rest.strip()
 
     if verb == "list":
-        entries = sorted(os.listdir(core.WORKSPACE_DIR))
-        if not entries:
-            return "(workspace is empty)"
-        return "\n".join(
-            f"- {n} ({os.path.getsize(os.path.join(core.WORKSPACE_DIR, n))}"
-            f" bytes)" for n in entries)
+        rest = _rel(rest)
+        root = core._workspace_path(rest) if rest else \
+            os.path.realpath(core.WORKSPACE_DIR)
+        if not root or not os.path.isdir(root):
+            return f"(no such folder in workspace: {rest})"
+        lines = _walk_workspace(root)
+        where = f"{rest.strip('/')}/" if rest else "workspace"
+        if not lines:
+            return f"({where} is empty)"
+        return f"{where}:\n" + "\n".join(lines)
 
     if verb == "read":
+        rest = _rel(rest)
         path = core._workspace_path(rest)
         if not path or not os.path.isfile(path):
             return f"(no such file in workspace: {rest})"
@@ -44,22 +97,90 @@ def file(arg: str, chat_id: int) -> str:
 
     if verb == "write":
         name, _, content = rest.partition("|")
-        name, content = name.strip(), content.strip()
+        name, content = _rel(name), content.strip()
         path = core._workspace_path(name)
         if not path:
             return "(refused: path escapes the workspace)"
         if not content:
             return "(nothing to write — use: write name.txt | content)"
+        if os.path.isdir(path):
+            return f"({name} is a folder, not a file)"
+        if not _ensure_parent(path):
+            return f"(couldn't create the folder for {name})"
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content + "\n")
         except OSError as e:
             return f"(write failed: {e})"
-        return f"(wrote {name}, {len(content)} chars)"
+        return (f"(wrote {name}, {len(content)} chars — this REPLACED "
+                f"any previous contents)")
+
+    if verb == "mkdir":
+        name = _rel(rest).rstrip("/")
+        path = core._workspace_path(name) if name else None
+        if not path:
+            return "(refused: path escapes the workspace)"
+        if os.path.isfile(path):
+            return f"({name} already exists as a file)"
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as e:
+            return f"(couldn't create folder: {e})"
+        return (f"(folder {name}/ ready — put files in it by using the "
+                f"full path, e.g. write {name}/notes.txt | ...)")
+
+    if verb == "append":
+        name, _, content = rest.partition("|")
+        name, content = _rel(name), content.strip()
+        path = core._workspace_path(name)
+        if not path:
+            return "(refused: path escapes the workspace)"
+        if not content:
+            return "(nothing to append — use: append name.txt | text)"
+        if os.path.isdir(path):
+            return f"({name} is a folder, not a file)"
+        if not _ensure_parent(path):
+            return f"(couldn't create the folder for {name})"
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(content + "\n")
+        except OSError as e:
+            return f"(append failed: {e})"
+        return f"(appended {len(content)} chars to {name})"
+
+    if verb == "edit":
+        name, _, rest2 = rest.partition("|")
+        old_text, sep, new_text = rest2.partition("|")
+        name, old_text = _rel(name), old_text.strip()
+        new_text = new_text.strip()
+        if not sep or not name or not old_text:
+            return ("(bad format — use: edit name.txt | text to find | "
+                    "text to replace it with. To empty a file's line, "
+                    "leave the replacement blank.)")
+        path = core._workspace_path(name)
+        if not path or not os.path.isfile(path):
+            return f"(no such file in workspace: {name})"
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                body = f.read()
+        except (OSError, UnicodeDecodeError) as e:
+            return f"(edit failed — can't read {name}: {e})"
+        count = body.count(old_text)
+        if not count:
+            return (f"(no match in {name} for: {old_text[:120]} — read "
+                    f"the file first and copy the exact text you want "
+                    f"to change, including spacing)")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(body.replace(old_text, new_text))
+        except OSError as e:
+            return f"(edit failed: {e})"
+        return (f"(edited {name} — replaced {count} occurrence"
+                f"{'' if count == 1 else 's'})")
 
     if verb == "send":
         name, _, caption = rest.partition("|")
-        name, caption = name.strip(), caption.strip()
+        name, caption = _rel(name), caption.strip()
         path = core._workspace_path(name)
         if not path or not os.path.isfile(path):
             return f"(no such file in workspace: {name})"
@@ -104,7 +225,7 @@ def file(arg: str, chat_id: int) -> str:
 
     if verb == "download":
         url, _, name = rest.partition("|")
-        url, name = url.strip(), name.strip()
+        url, name = url.strip(), _rel(name)
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
             return "(download refused: only http/https URLs)"
@@ -128,6 +249,8 @@ def file(arg: str, chat_id: int) -> str:
         path = core._workspace_path(name)
         if not path:
             return "(refused: filename escapes the workspace)"
+        if not _ensure_parent(path):
+            return f"(couldn't create the folder for {name})"
         try:
             size = 0
             with open(path, "wb") as f:
@@ -145,16 +268,28 @@ def file(arg: str, chat_id: int) -> str:
                 f"disk. If they asked you for it, your next action must "
                 f"be <file>send {name}</file>.)")
 
-    return ("(unknown file command — use: list | read <name> | "
-            "write <name> | <content> | download <url> | <name>)")
+    return ("(unknown file command — use: list [folder] | "
+            "read <name> | write <name> | <content> | "
+            "append <name> | <text> | edit <name> | <find> | <replace> "
+            "| mkdir <folder> | download <url> | <name> | "
+            "send <name>)")
 
 
 SKILL = {
     "name": "file",
     "desc": "Work with files in your workspace folder (the ONLY folder "
-            "you can access). Grammar: <file>list</file>, "
+            "you can access). You may use subfolders anywhere a name "
+            "is expected, e.g. notes/2026/july.txt. Grammar: "
+            "<file>list</file> or <file>list notes/2026</file>, "
             "<file>read notes.txt</file>, "
-            "<file>write notes.txt | the content</file>, "
+            "<file>write notes.txt | the content</file> (this REPLACES "
+            "the whole file — to add to one, use append; to change "
+            "part of one, use edit), "
+            "<file>append notes.txt | a new line</file>, "
+            "<file>edit notes.txt | old text | new text</file> (read "
+            "the file first and copy the exact text to change), "
+            "<file>mkdir notes/2026</file> (folders are also created "
+            "automatically when you write into them), "
             "<file>download https://url | saved-name.pdf</file> (always "
             "give the saved name a matching file extension; downloading "
             "only puts a file on disk — it does NOT give it to the "
