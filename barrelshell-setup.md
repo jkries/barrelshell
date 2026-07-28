@@ -105,6 +105,8 @@ Yours, never touched by updates:
 Created automatically:
   history.md            durable facts your Barrel saves
   web_chat.json         dashboard chat transcript
+  archives.md           the archive skill's dated log of topics discussed over time
+  archive_state.json    tracks how far the archive has caught up (don't hand-edit)
   pulse_state.json      pulse last-run tracking
   pulse_pending.json    tasks awaiting /approve
   reminders.json        pending one-shot reminders
