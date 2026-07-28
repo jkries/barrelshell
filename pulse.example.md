@@ -12,6 +12,11 @@ is worth sending, it replies PULSE_OK and stays silent.
 This file is re-read every cycle — edits take effect without a
 restart.
 
+## daily-archive
+schedule: 0 23 * * *
+
+Call <archive>gather</archive>. If it says there's nothing new, reply PULSE_OK and stop — do not call save. Otherwise, write 1-3 short lines naming the topics that came up (not a transcript, not direct quotes), commit it with <archive>save | your summary</archive>, then tell me in one friendly line what got added to the long-term archive.
+
 ## morning-brief
 schedule: 0 7 * * 1-5
 
