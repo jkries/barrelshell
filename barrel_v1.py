@@ -657,6 +657,31 @@ EMPTY_FALLBACKS = [
     "The model returned silence. Rephrase and I'll take another run.",
 ]
 
+# Known near-misses a smaller model sometimes writes instead of the
+# correct pulse grammar — <pulse>add name | cron | prompt</pulse>. Only
+# ONE tool currently has a "verb inside the tag" grammar (pulse, file),
+# and "add" reads like a plausible tag name on its own, so this is the
+# one confusion we have actual evidence of; repaired here rather than
+# silently discarded as unparseable text, which is what was happening
+# before — the model would write a perfectly good proposal and it
+# would simply vanish, no tool called, nothing pending, no error.
+_TAG_REPAIRS = [
+    (re.compile(r"<add>\s*(.*?)\s*</add>", re.DOTALL),
+     lambda m: f"<pulse>add {m.group(1)}</pulse>"),
+]
+
+
+def _repair_tags(text: str, chat_id: int) -> tuple[str, str]:
+    for pattern, fix in _TAG_REPAIRS:
+        m = pattern.search(text)
+        if m:
+            fixed = fix(m)
+            log_event("tag_repaired", chat_id=chat_id, was=m.group(0)[:200],
+                      now=fixed[:200])
+            return pattern.sub(fix, text, count=1), m.group(0)[:80]
+    return text, ""
+
+
 def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
                 on_status=lambda s: None) -> str:
     with agent_lock:
@@ -696,6 +721,10 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
                 stats["last_tps"] = round(t_out / (eval_ns / 1e9), 1)
             log_event("model_reply", chat_id=chat_id, round=_round,
                       raw=raw, tokens_in=t_in, tokens_out=t_out)
+            raw, repaired = _repair_tags(raw, chat_id)
+            if repaired:
+                trace(chat_id, f"\U0001f527 repaired a malformed tag: "
+                               f"{repaired}")
             reply, n_saved = save_history(raw)
             if n_saved:
                 trace(chat_id, f"\U0001f4be saved {n_saved} fact"
@@ -1448,6 +1477,16 @@ def approve_pending(name: str) -> str:
     pulse.md, and it only runs from a user-typed /approve command."""
     name = name.strip().lower()
     pending = load_json(PENDING_PULSE_FILE, {})
+    if not name:
+        # Bare "/approve" — fine to resolve on your own when there is
+        # exactly one candidate; still a real keystroke either way, so
+        # this doesn't loosen who can approve, only how much you type.
+        if not pending:
+            return "No pending tasks to approve."
+        if len(pending) > 1:
+            return (f"More than one task is pending — say which: "
+                    f"/approve <name>. Pending: {', '.join(pending)}")
+        name = next(iter(pending))
     if name not in pending:
         return (f"No pending task named '{name}'. Pending: "
                 f"{', '.join(pending) or 'none'}")
