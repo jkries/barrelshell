@@ -145,7 +145,15 @@ def _search(query: str) -> str:
 
 
 def archive(arg: str, chat_id: int) -> str:
-    verb, _, rest = arg.strip().partition(" ")
+    arg = arg.strip()
+    if not arg:
+        # No verb at all is genuinely ambiguous — gather? recent? —
+        # so say so rather than silently picking one. A malformed or
+        # argument-less tool call should land here as a visible,
+        # actionable error, not quietly succeed at the wrong thing.
+        return ("(archive needs a command — use: gather | save | topic "
+               "summary | recent [N] | search | words)")
+    verb, _, rest = arg.partition(" ")
     verb, rest = verb.lower(), rest.strip()
 
     if verb == "gather":
@@ -155,7 +163,7 @@ def archive(arg: str, chat_id: int) -> str:
         # file skill's two-part verbs, but save only takes one value —
         # strip the separator itself rather than treating it as content.
         return _save(rest.lstrip("|").strip())
-    if verb in ("recent", ""):
+    if verb == "recent":
         return _recent(rest)
     if verb == "search":
         return _search(rest.lstrip("|").strip())
