@@ -573,7 +573,10 @@ answer from it — never assume you did.
 
 Tool rules: emit ONE tool tag, then STOP — write nothing after it.
 The result will be provided; then answer the user (or use another
-tool if genuinely needed). Never mention the tag mechanism.
+tool if genuinely needed). Never mention the tag mechanism. The TAG
+NAME IS the tool's name — never wrap a call as <tool>name</tool> or
+similar; write <toolname>argument</toolname> directly, e.g.
+<calc>2+2</calc>, never <tool>calc</tool>.
 
 Multi-step requests: finish every step before replying. A request
 like "find X and send it to me" is not done when you have found it —
@@ -665,20 +668,49 @@ EMPTY_FALLBACKS = [
 # silently discarded as unparseable text, which is what was happening
 # before — the model would write a perfectly good proposal and it
 # would simply vanish, no tool called, nothing pending, no error.
+def _fix_tool_wrapper(m: "re.Match") -> str:
+    """<tool>name</tool> or <tool>name | args</tool> is a generic
+    tool-call XML shape common elsewhere in the wider LLM ecosystem —
+    a smaller model reaches for it as the "more standard" convention
+    even though every tool desc here already says <toolname>arg</...>.
+    Only rewrite when the name is one of OUR actual tools; anything
+    else is left alone rather than guessed at."""
+    name, args = m.group(1), (m.group(2) or "")
+    if name not in TOOLS:
+        return m.group(0)   # declines — not a name we recognize
+    return f"<{name}>{args}</{name}>"
+
+
+# Known near-misses a smaller model sometimes writes instead of the
+# correct grammar. Each is repaired here — deterministically, in code
+# — rather than silently discarded as unparseable text, which is what
+# used to happen: the model would write a perfectly good intention and
+# it would simply vanish with no tool called, nothing pending, no
+# visible error at all.
 _TAG_REPAIRS = [
+    # <pulse>add ...</pulse> written as <add>...</add> — "add" reads
+    # like a plausible tag name on its own.
     (re.compile(r"<add>\s*(.*?)\s*</add>", re.DOTALL),
      lambda m: f"<pulse>add {m.group(1)}</pulse>"),
+    # Any tool written as <tool>name</tool> or <tool>name | args</tool>
+    # instead of <name>args</name> — a different, more generic
+    # tool-calling convention entirely, seen across any tool.
+    (re.compile(r"<tool>\s*([a-zA-Z0-9_]+)\s*(?:\|\s*(.*?))?\s*</tool>",
+               re.DOTALL), _fix_tool_wrapper),
 ]
 
 
 def _repair_tags(text: str, chat_id: int) -> tuple[str, str]:
     for pattern, fix in _TAG_REPAIRS:
         m = pattern.search(text)
-        if m:
-            fixed = fix(m)
-            log_event("tag_repaired", chat_id=chat_id, was=m.group(0)[:200],
-                      now=fixed[:200])
-            return pattern.sub(fix, text, count=1), m.group(0)[:80]
+        if not m:
+            continue
+        fixed = fix(m)
+        if fixed == m.group(0):
+            continue   # the fixer declined — not actually a repair
+        log_event("tag_repaired", chat_id=chat_id, was=m.group(0)[:200],
+                  now=fixed[:200])
+        return pattern.sub(fix, text, count=1), m.group(0)[:80]
     return text, ""
 
 
