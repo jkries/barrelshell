@@ -107,6 +107,9 @@ Created automatically:
   web_chat.json         dashboard chat transcript
   archives.md           the archive skill's dated log of topics discussed over time
   archive_state.json    tracks how far the archive has caught up (don't hand-edit)
+  messages.db            the transcript skill's permanent backup — every message,
+                         structured and searchable (run backfill_transcript.py once
+                         to pull in history from before this skill was installed)
   pulse_state.json      pulse last-run tracking
   pulse_pending.json    tasks awaiting /approve
   reminders.json        pending one-shot reminders

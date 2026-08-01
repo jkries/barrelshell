@@ -828,7 +828,12 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
                                f"{turn_in} tokens in / {turn_out} out")
                 convo.append({"role": "assistant",
                                 "content": final_reply})
-                log_event("final_reply", chat_id=chat_id,
+                # kind distinguishes a real user turn from a pulse
+                # task talking to itself — the transcript skill (and
+                # anything else reading the log) needs that to avoid
+                # backing up the bot's own scheduled chatter as if it
+                # were a conversation.
+                log_event("final_reply", chat_id=chat_id, kind=kind,
                           text=final_reply)
                 break
 
