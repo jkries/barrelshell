@@ -1008,7 +1008,19 @@ def fire_task(task: dict, state: dict, now: datetime) -> None:
               f"Task: {task['prompt']}")
     try:
         reply = handle_turn(PULSE_CHAT_ID, prompt, kind="pulse")
-        if reply.strip() != "PULSE_OK":
+        # PULSE_OK is meant to BE the whole reply when there's nothing
+        # to report — but a smaller model sometimes adds a stray
+        # remark before it instead of replying with just the marker.
+        # Checking the LAST LINE (not an exact full-string match, and
+        # not a bare substring check either) catches that near-miss
+        # without misfiring on a reply that legitimately mentions
+        # "PULSE_OK" mid-sentence as real content — e.g. an archive
+        # summary about this very mechanism. Either way, the raw
+        # sentinel must never leak to the user as visible chat text.
+        stripped = reply.strip()
+        last_line = (stripped.splitlines()[-1].strip().rstrip(".!")
+                    if stripped else "")
+        if last_line.upper() != "PULSE_OK":
             deliver(PULSE_CHAT_ID, reply, "pulse")
     except Exception as e:
         print(f"pulse: '{task['name']}' failed: {e}")
