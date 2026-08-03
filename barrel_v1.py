@@ -681,6 +681,23 @@ def _fix_tool_wrapper(m: "re.Match") -> str:
     return f"<{name}>{args}</{name}>"
 
 
+def _fix_mismatched_closer(m: "re.Match") -> str:
+    """<name>content</different_name> — the OPENING tag is a real,
+    known tool, but the CLOSING tag doesn't match it (TOOL_RE requires
+    an exact backreference between the two, so this never matches at
+    all otherwise — ingestion or whatever tool was intended silently
+    doesn't run, and the raw broken tag ends up as the "reply"
+    instead). The opening name is the one we trust — it's the model's
+    first, presumably more deliberate word — and is used to correct
+    the closing tag rather than guessing from the mismatched one.
+    Declines when the opening name isn't a real tool, or when the two
+    already match (nothing to fix)."""
+    open_name, content, close_name = m.group(1), m.group(2), m.group(3)
+    if open_name not in TOOLS or open_name == close_name:
+        return m.group(0)
+    return f"<{open_name}>{content}</{open_name}>"
+
+
 # Known near-misses a smaller model sometimes writes instead of the
 # correct grammar. Each is repaired here — deterministically, in code
 # — rather than silently discarded as unparseable text, which is what
@@ -697,6 +714,13 @@ _TAG_REPAIRS = [
     # tool-calling convention entirely, seen across any tool.
     (re.compile(r"<tool>\s*([a-zA-Z0-9_]+)\s*(?:\|\s*(.*?))?\s*</tool>",
                re.DOTALL), _fix_tool_wrapper),
+    # A correct opening tag with a garbled closing tag — e.g.
+    # <transcript>ingest</transact> — "transcript" apparently blended
+    # with the DB-adjacent word "transact" mid-generation. Checked
+    # last since it's the most general shape (matches any <x>...</y>,
+    # including well-formed pairs, which the fixer then declines).
+    (re.compile(r"<([a-zA-Z0-9_]+)>(.*?)</([a-zA-Z0-9_]+)>", re.DOTALL),
+     _fix_mismatched_closer),
 ]
 
 
