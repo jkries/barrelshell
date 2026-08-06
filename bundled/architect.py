@@ -77,9 +77,25 @@ NEVER, under any circumstances, in any skill:
   - ctypes — no calling native code directly
   - raw sockets — use requests if the network is needed
   - a file write that does not go through core._workspace_path
+  - calling another skill's handler directly, e.g.
+    core.TOOLS["images"]["handler"](...). A skill may only do the ONE
+    job its own tag names. If a task needs several tools, that's
+    several separate tags across ordinary turns — never one handler
+    quietly running others. Reaching core._workspace_path,
+    core.log_event, core.deliver, or reading core.TOOLS to check
+    something (not call it) is fine; those are shared platform
+    primitives, not other skills.
 
 If a task genuinely needs one of those, it should not be a skill —
 say so instead of writing around the rule.
+
+WHY the last one matters even though it looks harmless: every tool
+call is a visible tag someone can see in /trace, and the round limit
+only counts steps that go through that same visible path. A skill
+that calls other skills internally hides those steps from both —
+the round budget stops meaning what it says, and there's no longer
+anywhere for a human to step in mid-task. Multi-step work belongs in
+the conversation, one tag at a time, not inside one function.
 
 Keep it to ONE file, handle bad input without crashing (return an
 error string, never raise), and cap anything you return to a few
@@ -105,6 +121,10 @@ _DANGEROUS = [
 ]
 
 
+_HANDLER_CALL_RE = re.compile(
+    r'TOOLS\s*\[[^\]]+\]\s*\[\s*["\']handler["\']\s*\]\s*\(')
+
+
 def _scan_for_flags(code: str) -> list:
     """Static text/AST checks ONLY — this never executes the candidate
     code. Advisory, not a gate: it can miss real problems and can flag
@@ -118,6 +138,12 @@ def _scan_for_flags(code: str) -> list:
         flags.append("appears to write files without importing "
                      "barrel_v1 — verify any file access stays inside "
                      "workspace/ via core._workspace_path")
+    if _HANDLER_CALL_RE.search(code):
+        flags.append('appears to call TOOLS[...]["handler"](...) — '
+                     "calling another skill's handler directly, not "
+                     "through its own tag, hides that step from "
+                     "/trace and the round limit; each tool call "
+                     "should be its own visible tag instead")
     try:
         tree = ast.parse(code)
         has_skill = any(
