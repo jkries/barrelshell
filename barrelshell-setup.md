@@ -432,6 +432,22 @@ default, so tracing in the dashboard won't spam Telegram. (`/train`
 and `/debug` are aliases — nothing is being trained; this only shows
 what the machinery is doing.)
 
+**Long-running work.** For genuinely big builds (a website, a
+larger game), two things matter: `max_tool_rounds` (how many tool
+calls one turn can chain) and `num_ctx` (how much the model can hold
+in mind at once) both default conservatively for broad hardware
+compatibility. On a high-end machine, raising `max_tool_rounds` to
+6+ and `num_ctx` to 32768 (both live via `/reload`) lets a single
+turn get much further before stopping. Past a certain round count on
+Telegram, you'll also start seeing interim "still working" messages
+so a long build doesn't look like it's hung.
+
+For work too big for one sitting even with generous limits, the
+`project` skill tracks a to-do note across pulse cycles — start a
+project, and a background task picks it up in small chunks over
+time. Send `/progress` any time to see what's actively running right
+now plus any longer projects waiting on their next cycle.
+
 **Applying changes without a restart.** Send `/reload` to re-read
 config.json and rescan bundled/ and skills/ — new or edited skill
 files show up immediately, deleted ones disappear, and most config
