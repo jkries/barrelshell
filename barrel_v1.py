@@ -72,6 +72,7 @@ DEFAULTS = {
     "model": "qwen3:8b",
     "num_ctx": 16384,
     "max_tool_rounds": 3,
+    "progress_update_rounds": 3,
     "max_turns": 40,
     "search_results": 5,
     "fetch_max_chars": 4000,
@@ -110,6 +111,7 @@ _cfg = _load_config()
 MODEL = str(_cfg["model"])
 NUM_CTX = int(_cfg["num_ctx"])
 MAX_TOOL_ROUNDS = int(_cfg["max_tool_rounds"])
+PROGRESS_UPDATE_ROUNDS = int(_cfg["progress_update_rounds"])
 MAX_TURNS = int(_cfg["max_turns"])
 SEARCH_RESULTS = int(_cfg["search_results"])
 FETCH_MAX_CHARS = int(_cfg["fetch_max_chars"])
@@ -753,6 +755,8 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
         convo = conversations.setdefault(chat_id, [])
         convo.append({"role": "user", "content": user_text})
 
+        active_tasks[chat_id] = {"started": datetime.now().isoformat(
+            timespec="seconds"), "kind": kind, "round": 0, "last_tool": None}
         seen_calls: set[tuple] = set()
         total_saved = 0
         nudged_save = False
@@ -859,6 +863,7 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
                 # were a conversation.
                 log_event("final_reply", chat_id=chat_id, kind=kind,
                           text=final_reply)
+                active_tasks.pop(chat_id, None)
                 break
 
             tool, arg = match.group(1), match.group(2).strip()
@@ -872,6 +877,10 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
             seen_calls.add(call_key)
 
             stats["tools"][tool] = stats["tools"].get(tool, 0) + 1
+            active_tasks[chat_id] = {
+                "started": active_tasks.get(chat_id, {}).get(
+                    "started", datetime.now().isoformat(timespec="seconds")),
+                "kind": kind, "round": _round + 1, "last_tool": tool}
             on_status(f"{tool}: {arg}")
             origin = TOOLS[tool].get("origin", "core")
             trace(chat_id, f"\U0001f527 round {_round + 1} — {tool} "
@@ -884,6 +893,24 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
                            f"{result[:TRACE_PREVIEW]}")
             log_event("tool_call", tool=tool, arg=arg,
                       result_chars=len(result))
+            if (_round + 1 > PROGRESS_UPDATE_ROUNDS and kind != "pulse"
+                    and chat_id != WEB_CHAT_ID):
+                # Real interim messages only make sense on Telegram — a
+                # push channel where several messages over time is
+                # normal. Web chat only records the user's turn and
+                # the final reply after the whole turn completes (to
+                # avoid the ordering issue that caused duplicate
+                # messages before), so a mid-turn push there would
+                # show up chronologically BEFORE the question that
+                # triggered it. The live tracker below still updates
+                # either way, so /progress works from any surface —
+                # only the proactive ping is Telegram-only for now.
+                try:
+                    deliver(chat_id, f"\u23f3 Still working — just used "
+                                     f"{tool} (step {_round + 1}).",
+                           "progress")
+                except Exception:
+                    pass
             convo.append({"role": "user", "content":
                             f"[{tool.upper()} RESULT for \"{arg}\"]\n"
                             f"{result}\n[END RESULT] Use this to answer "
@@ -1445,6 +1472,11 @@ def web_post(role: str, text: str, kind: str = "chat") -> int:
 
 trace_chats: set = set()        # chat ids with /trace switched on
 web_trace_buffer: list = []     # web lines, flushed in order by /chat
+
+# Live view of any turn currently mid-flight — for /progress and the
+# interim update pings below. Cleared unconditionally when a turn
+# ends, success or failure, so it never shows stale work as ongoing.
+active_tasks: dict = {}
 TRACE_PREVIEW = 220
 
 
@@ -1533,6 +1565,36 @@ UNSUPPORTED = {
     "contact": "contacts",
 }
 
+def show_progress() -> str:
+    """Two different senses of 'in progress', both worth showing: a
+    turn currently mid-flight right now (active_tasks), and any
+    longer-running project sitting between pulse cycles (read via the
+    project skill's own list verb, if that skill is loaded — this is
+    core reading the registry to introspect it, the same thing status
+    already does, not a skill calling a skill)."""
+    lines = []
+    if active_tasks:
+        for cid, info in active_tasks.items():
+            where = "web chat" if cid == WEB_CHAT_ID else "Telegram"
+            try:
+                elapsed = int((datetime.now() - datetime.fromisoformat(
+                    info["started"])).total_seconds())
+            except ValueError:
+                elapsed = 0
+            lines.append(f"\u23f3 {where}: round {info['round']}, last "
+                         f"used {info['last_tool'] or 'nothing yet'} "
+                         f"({elapsed}s so far)")
+    else:
+        lines.append("Nothing actively running right now.")
+    if "project" in TOOLS:
+        proj = TOOLS["project"]["handler"]("list", 0)
+        if proj and "no projects" not in proj.lower():
+            lines.append("")
+            lines.append("Longer-running projects:")
+            lines.append(proj)
+    return "\n".join(lines)
+
+
 COMMANDS = {
     "/history": lambda: read_file(HISTORY_FILE, "(no history yet)"),
     "/pulse": lambda: "\n".join(
@@ -1542,6 +1604,7 @@ COMMANDS = {
         f"{r['due']}: {r['message']}"
         for r in load_json(REMINDERS_FILE, []))
         or "(no pending reminders)",
+    "/progress": show_progress,
 }
 
 
@@ -1622,6 +1685,7 @@ _RELOADABLE_CONFIG = [
     ("model", "MODEL", str),
     ("num_ctx", "NUM_CTX", int),
     ("max_tool_rounds", "MAX_TOOL_ROUNDS", int),
+    ("progress_update_rounds", "PROGRESS_UPDATE_ROUNDS", int),
     ("max_turns", "MAX_TURNS", int),
     ("search_results", "SEARCH_RESULTS", int),
     ("fetch_max_chars", "FETCH_MAX_CHARS", int),
