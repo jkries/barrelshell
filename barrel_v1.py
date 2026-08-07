@@ -692,11 +692,20 @@ def _fix_mismatched_closer(m: "re.Match") -> str:
     instead). The opening name is the one we trust — it's the model's
     first, presumably more deliberate word — and is used to correct
     the closing tag rather than guessing from the mismatched one.
-    Declines when the opening name isn't a real tool, or when the two
-    already match (nothing to fix)."""
+
+    The closing name must also plausibly BE a garbling of the opening
+    one (sharing a real prefix, e.g. transcript/transact), not merely
+    any different word. Without that, this happily "fixes"
+    <file>...</title> inside an HTML file being written, truncating
+    the file at its first closing tag — which is exactly what it did
+    before this check existed."""
     open_name, content, close_name = m.group(1), m.group(2), m.group(3)
     if open_name not in TOOLS or open_name == close_name:
         return m.group(0)
+    prefix_len = len(os.path.commonprefix([open_name, close_name]))
+    if prefix_len < 4 and not (open_name.startswith(close_name)
+                               or close_name.startswith(open_name)):
+        return m.group(0)   # unrelated words — not a garbling
     return f"<{open_name}>{content}</{open_name}>"
 
 
@@ -727,6 +736,17 @@ _TAG_REPAIRS = [
 
 
 def _repair_tags(text: str, chat_id: int) -> tuple[str, str]:
+    # If a well-formed tool call is ALREADY present, there is nothing
+    # to repair — and attempting one is actively destructive. A tool
+    # argument can legitimately contain markup: writing an HTML file
+    # means <file>write x.html | ...<title>T</title>...</file>, whose
+    # inner tags look exactly like malformed tool calls to a pattern
+    # matcher. Rewriting one truncates the argument at that point and
+    # silently discards the rest of the file. Repairs exist for the
+    # case where NO valid call parsed at all; that is the only case
+    # they may touch.
+    if TOOL_RE.search(text):
+        return text, ""
     for pattern, fix in _TAG_REPAIRS:
         m = pattern.search(text)
         if not m:
@@ -768,7 +788,8 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
                           "content": build_system_prompt()}]
                         + convo[-MAX_TURNS:])
             response = ollama.chat(model=MODEL, messages=messages,
-                                   options={"num_ctx": NUM_CTX})
+                                   options={"num_ctx": NUM_CTX,
+                                           "num_predict": -1})
             raw = response["message"]["content"]
             t_in = _count(response, "prompt_eval_count")
             t_out = _count(response, "eval_count")
@@ -1517,7 +1538,7 @@ def describe_image(image_bytes: bytes) -> str:
                     "cannot see it. Transcribe any visible text "
                     "exactly. Note objects, people, layout, and "
                     "anything unusual."),
-        "images": [image_bytes]}])
+        "images": [image_bytes]}], options={"num_predict": -1})
     t_in = _count(response, "prompt_eval_count")
     t_out = _count(response, "eval_count")
     track_tokens(t_in, t_out)
