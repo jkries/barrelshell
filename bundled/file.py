@@ -25,6 +25,47 @@ def _rel(name: str) -> str:
     return name.strip().lstrip("/\\").strip()
 
 
+_HTML_EXTS = (".html", ".htm")
+
+
+def _completeness_hint(path: str, name: str) -> str:
+    """A cheap, generic sanity check — NOT verification (nothing here
+    can run the page to confirm it actually works). Checks the two
+    cheapest, clearest signs a generation got cut off: an outermost
+    tag that opened but never closed, OR content so short it can't
+    plausibly BE a real page — a generation cut off early enough
+    never even reaches "<html" in the first place, which the
+    unclosed-tag check alone can't see. Returns a short warning
+    suffix, or "" if the check doesn't apply or nothing looks wrong."""
+    if not name.lower().endswith(_HTML_EXTS):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            body = f.read()
+    except OSError:
+        return ""
+    lower = body.lower()
+    if "<html" in lower and "</html>" not in lower:
+        return ("\n\u26a0 This file has an opening <html> tag but no "
+                "closing </html> — it looks like it may have been cut "
+                "off mid-generation. Read it back before assuming "
+                "it's complete or telling the user it's ready.")
+    if len(body.strip()) < 5 or (
+            "<html" not in lower and "<!doctype" not in lower):
+        return (f"\n\u26a0 This file is only {len(body.strip())} "
+                f"character(s) and doesn't contain <html or "
+                f"<!DOCTYPE anywhere — a generation cut off very "
+                f"early wouldn't even reach those, so the "
+                f"unclosed-tag check alone can't catch this. Read it "
+                f"back before assuming it's complete or telling the "
+                f"user it's ready. If this keeps happening, the "
+                f"individual piece you're generating is still too "
+                f"large — make it smaller still, don't switch to "
+                f"writing the whole page in one shot, which is the "
+                f"ORIGINAL problem this guidance exists to avoid.")
+    return ""
+
+
 def _ensure_parent(path: str) -> bool:
     """Create the folder a file is about to live in. Safe because the
     path came from core._workspace_path, which already refused
@@ -113,7 +154,7 @@ def file(arg: str, chat_id: int) -> str:
         except OSError as e:
             return f"(write failed: {e})"
         return (f"(wrote {name}, {len(content)} chars — this REPLACED "
-                f"any previous contents)")
+                f"any previous contents)" + _completeness_hint(path, name))
 
     if verb == "mkdir":
         name = _rel(rest).rstrip("/")
@@ -146,7 +187,8 @@ def file(arg: str, chat_id: int) -> str:
                 f.write(content + "\n")
         except OSError as e:
             return f"(append failed: {e})"
-        return f"(appended {len(content)} chars to {name})"
+        return (f"(appended {len(content)} chars to {name})"
+               + _completeness_hint(path, name))
 
     if verb == "edit":
         name, _, rest2 = rest.partition("|")
@@ -176,7 +218,7 @@ def file(arg: str, chat_id: int) -> str:
         except OSError as e:
             return f"(edit failed: {e})"
         return (f"(edited {name} — replaced {count} occurrence"
-                f"{'' if count == 1 else 's'})")
+                f"{'' if count == 1 else 's'})" + _completeness_hint(path, name))
 
     if verb == "send":
         name, _, caption = rest.partition("|")
@@ -284,7 +326,25 @@ SKILL = {
             "<file>read notes.txt</file>, "
             "<file>write notes.txt | the content</file> (this REPLACES "
             "the whole file — to add to one, use append; to change "
-            "part of one, use edit), "
+            "part of one, use edit). For anything longer than a "
+            "paragraph or two — a whole HTML page, several files, a "
+            "multi-section document — build it in SEVERAL smaller "
+            "steps, not one long piece of text: a single very long "
+            "generation can get cut off partway through with no "
+            "error, leaving broken content saved to disk. For an "
+            "HTML page specifically: write a COMPLETE, PROPERLY "
+            "CLOSED skeleton first, with placeholder empty tags — "
+            "<style></style>, <script></script> — then use EDIT to "
+            "replace those exact empty tags with the real content, "
+            "one piece at a time. Do NOT use append to add CSS or "
+            "JS after writing a closed skeleton — append only adds "
+            "to the very end of the FILE, after </html>, not inside "
+            "any tag, so it will not land where you meant it to. "
+            "You cannot verify that HTML/JS/CSS you write actually "
+            "runs correctly — there is no way to execute it here. "
+            "Never tell the user something 'works' or is 'ready to "
+            "play'; say you've saved a draft and ask them to open it "
+            "and report back what happens. "
             "<file>append notes.txt | a new line</file>, "
             "<file>edit notes.txt | old text | new text</file> (read "
             "the file first and copy the exact text to change), "
