@@ -602,7 +602,10 @@ token usage, context fill, loaded model), use the status tool.
 ## Pulse protocol
 Some turns are scheduled tasks, marked [PULSE]. These are your own
 routines firing, not the user. Do the task, then send what's worth
-sending. If nothing is worth sending, reply exactly PULSE_OK.
+sending. If nothing is worth sending, reply with exactly the bare
+word PULSE_OK — on its own, with nothing else in the message. It is
+NOT a tool tag: never write it as <PULSE_OK>, never wrap it in
+backticks or asterisks, and never add a sentence before or after it.
 
 ## Style
 {style_note}
@@ -1081,18 +1084,19 @@ def fire_task(task: dict, state: dict, now: datetime) -> None:
     try:
         reply = handle_turn(PULSE_CHAT_ID, prompt, kind="pulse")
         # PULSE_OK is meant to BE the whole reply when there's nothing
-        # to report — but a smaller model sometimes adds a stray
-        # remark before it instead of replying with just the marker.
-        # Checking the LAST LINE (not an exact full-string match, and
-        # not a bare substring check either) catches that near-miss
-        # without misfiring on a reply that legitimately mentions
-        # "PULSE_OK" mid-sentence as real content — e.g. an archive
-        # summary about this very mechanism. Either way, the raw
-        # sentinel must never leak to the user as visible chat text.
+        # to report, but the model decorates it in ways that are
+        # obviously still the sentinel: <PULSE_OK> (treating it as a
+        # tag, unsurprising given every tool call in the protocol is
+        # one), **PULSE_OK**, `PULSE_OK`, trailing punctuation, or a
+        # stray remark on a line above it. Compare the LAST LINE with
+        # all non-alphanumerics removed, so any wrapping is ignored.
+        # Still safe against a reply that legitimately mentions the
+        # word mid-sentence — that line normalizes to far more than
+        # just "PULSEOK" and so won't match.
         stripped = reply.strip()
-        last_line = (stripped.splitlines()[-1].strip().rstrip(".!")
-                    if stripped else "")
-        if last_line.upper() != "PULSE_OK":
+        last_line = stripped.splitlines()[-1] if stripped else ""
+        normalized = re.sub(r"[^A-Za-z0-9]", "", last_line).upper()
+        if normalized != "PULSEOK":
             deliver(PULSE_CHAT_ID, reply, "pulse")
     except Exception as e:
         print(f"pulse: '{task['name']}' failed: {e}")
