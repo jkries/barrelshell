@@ -1697,10 +1697,36 @@ def remove_pulse_task(name: str) -> str:
     return f"Removed pulse task '{name}'."
 
 
+def cancel_project(name: str) -> str:
+    """HUMAN-ONLY: drop a project so it stops being auto-resumed.
+    Deterministic code the model cannot invoke, for the same reason
+    /approve is — if the bot could start recurring work for itself,
+    the human needs a way to stop it that doesn't depend on asking
+    the bot nicely."""
+    name = name.strip()
+    state = load_json("project_state.json", {})
+    active = state.get("active", {})
+    if not name:
+        if not active:
+            return "No projects in progress."
+        return (f"Which one? /cancel_project <name>. Active: "
+                f"{', '.join(active)}")
+    if name not in active:
+        return (f"No active project called '{name}'. Active: "
+                f"{', '.join(active) or 'none'}")
+    active.pop(name)
+    state["active"] = active
+    save_json("project_state.json", state)
+    log_event("project_cancelled", name=name)
+    return (f"Cancelled '{name}' — it won't be picked up again. Any "
+            f"files it already created are still in the workspace.")
+
+
 PREFIX_COMMANDS = {
     "/approve": approve_pending,
     "/reject": reject_pending,
     "/pulse_remove": remove_pulse_task,
+    "/cancel_project": cancel_project,
 }
 
 
