@@ -24,6 +24,7 @@ from datetime import datetime
 import barrel_v1 as core
 
 STATE_FILE = "project_state.json"
+MAX_CYCLES = 20   # a project stops auto-resuming after this many
 
 
 def _load_state() -> dict:
@@ -34,7 +35,20 @@ def _save_state(state: dict) -> None:
     core.save_json(STATE_FILE, state)
 
 
-def _start(arg: str) -> str:
+def _start(arg: str, chat_id: int = 0) -> str:
+    # A project creates RECURRING autonomous work — resume-projects
+    # picks it up every cycle, indefinitely. By this platform's own
+    # trust tiers that's the same category as a scheduled task, which
+    # requires human approval. So a project may only be created in an
+    # actual conversation, never by a scheduled task talking to
+    # itself: otherwise the bot can invent work for itself in the
+    # background and start reporting on it unprompted, with the user
+    # never having asked for any of it.
+    if core.active_tasks.get(chat_id, {}).get("kind") == "pulse":
+        return ("(refused: projects can only be started in a "
+                "conversation with the user, not from a scheduled "
+                "task. If this project is worth doing, mention it to "
+                "the user and let them ask for it.)")
     name, _, rest = arg.partition("|")
     name, description = name.strip(), rest.strip()
     if not name or not description:
@@ -75,6 +89,20 @@ def _note(arg: str) -> str:
     active[name]["cycles"] += 1
     state["active"] = active
     _save_state(state)
+    cycles = active[name]["cycles"]
+    if cycles >= MAX_CYCLES:
+        # Stop rather than grind on unbounded. A project that has had
+        # this many cycles without finishing is either stuck or bigger
+        # than it looked, and either way that's a call for the human,
+        # not something to keep quietly burning cycles on forever.
+        active[name]["paused"] = True
+        state["active"] = active
+        _save_state(state)
+        core.log_event("project_paused", name=name, cycles=cycles)
+        return (f"(noted — but '{name}' has now run {cycles} cycles "
+                f"without finishing, so it is PAUSED and will not be "
+                f"picked up again automatically. Tell the user it's "
+                f"paused and ask whether to continue it, and how.)")
     return f"(noted — next cycle on '{name}' will pick up from that)"
 
 
@@ -104,7 +132,8 @@ def _list(arg: str) -> str:
         return "(no projects in progress)"
     lines = []
     for name, e in active.items():
-        lines.append(f"- {name}: cycle {e['cycles']} — next: "
+        tag = " [PAUSED — needs the user's go-ahead]" if e.get("paused") else ""
+        lines.append(f"- {name}: cycle {e['cycles']}{tag} — next: "
                      f"{e['next_step']}")
     return "\n".join(lines)
 
@@ -113,7 +142,7 @@ def project(arg: str, chat_id: int) -> str:
     verb, _, rest = arg.strip().partition(" ")
     verb, rest = verb.lower(), rest.strip()
     if verb == "start":
-        return _start(rest)
+        return _start(rest, chat_id)
     if verb == "note":
         return _note(rest)
     if verb == "complete":
