@@ -146,18 +146,79 @@ def _scan_for_flags(code: str) -> list:
                      "should be its own visible tag instead")
     try:
         tree = ast.parse(code)
-        has_skill = any(
-            isinstance(n, ast.Assign)
-            and any(isinstance(t, ast.Name) and t.id == "SKILL"
-                   for t in n.targets)
-            for n in ast.walk(tree))
-        if not has_skill:
+        skill_node = None
+        for n in ast.walk(tree):
+            if (isinstance(n, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == "SKILL"
+                           for t in n.targets)):
+                skill_node = n.value
+                break
+        if skill_node is None:
             flags.append("no top-level SKILL = {...} dict found — the "
                          "loader will skip this file entirely as-is")
+        else:
+            flags.extend(_check_skill_contract(skill_node, tree))
     except SyntaxError as e:
         flags.append(f"does not parse as valid Python (line "
                      f"{e.lineno}): {e.msg} — this won't load until "
                      f"fixed")
+    return flags
+
+
+def _check_skill_contract(skill_node, tree) -> list:
+    """Validate the SKILL dict against what the loader ACTUALLY
+    requires. Without this, a skill can be perfectly safe, parse
+    cleanly, and still be silently skipped at load time — which looks
+    identical to 'nothing happened' from the outside. The model is
+    quite capable of inventing a plausible but wrong plugin API
+    (description/id/version/run() instead of desc/handler), and every
+    invented key passes a safety scan without complaint."""
+    flags = []
+    if not isinstance(skill_node, ast.Dict):
+        return ["SKILL is not a literal dict — the loader reads it "
+                "with .get(), so it must be a plain dict literal"]
+    keys = [k.value for k in skill_node.keys
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+
+    if "desc" not in keys:
+        wrong = next((k for k in ("description", "summary", "about",
+                                  "help", "doc") if k in keys), None)
+        flags.append(
+            f"SKILL has no 'desc' key" +
+            (f" — it has '{wrong}' instead; the loader requires exactly "
+             f"'desc'" if wrong else " — the loader requires it") +
+            ", so this file will be SKIPPED at load time")
+    if "handler" not in keys:
+        flags.append(
+            "SKILL has no 'handler' key — the loader requires a "
+            "callable handler(arg: str, chat_id: int) -> str. An "
+            "entry point named run(), main(), execute() or similar is "
+            "NOT the contract here and will be ignored, so this file "
+            "will be SKIPPED at load time")
+
+    # name must be lowercase [a-z0-9_]+ — a display-style name silently
+    # fails the loader's regex with no error anywhere the user sees.
+    for k, v in zip(skill_node.keys, skill_node.values):
+        if (isinstance(k, ast.Constant) and k.value == "name"
+                and isinstance(v, ast.Constant)
+                and isinstance(v.value, str)):
+            if not re.fullmatch(r"[a-z0-9_]+", v.value):
+                flags.append(
+                    f"SKILL name {v.value!r} is not valid — it must "
+                    f"match [a-z0-9_]+ (lowercase letters, digits and "
+                    f"underscores only, no spaces or capitals). This "
+                    f"alone makes the loader skip the file")
+    if "name" not in keys:
+        flags.append("SKILL has no 'name' key — required")
+
+    unknown = [k for k in keys
+               if k not in ("name", "desc", "handler")]
+    if unknown:
+        flags.append(
+            f"SKILL has key(s) the loader does not use: "
+            f"{', '.join(sorted(unknown))}. Only name, desc and "
+            f"handler are read — extra keys usually mean the file was "
+            f"written against a different (imagined) plugin API")
     return flags
 
 
