@@ -19,6 +19,7 @@ calls live here. It only tracks state. The actual work happens via
 ordinary tags in the SAME turn that calls these verbs, exactly the
 rule the gamedev idea led to adding to the architect template.
 """
+import re
 from datetime import datetime
 
 import barrel_v1 as core
@@ -54,6 +55,17 @@ def _start(arg: str, chat_id: int = 0) -> str:
     if not name or not description:
         return ("(bad format — use: start short-name | what this "
                 "project is and what the first step should be)")
+    # The model sometimes copies this skill's own documentation
+    # verbatim — literally calling start with "[name] | [description]"
+    # — which creates a project with nothing real in it that then
+    # cannot be worked on, forever. Reject anything that still looks
+    # like a template rather than a real value.
+    if re.search(r"[\[<]\s*(name|description|short-name|project|"
+                 r"what to do|next step)\s*[\]>]", f"{name} {description}",
+                 re.IGNORECASE) or name.startswith(("[", "<")):
+        return ("(refused: that looks like the placeholder text from "
+                "the instructions, not a real project. Use an actual "
+                "short name and an actual description of the work.)")
     state = _load_state()
     active = state.get("active", {})
     if name in active:
@@ -106,6 +118,32 @@ def _note(arg: str) -> str:
     return f"(noted — next cycle on '{name}' will pick up from that)"
 
 
+def _pause(arg: str) -> str:
+    """Blocked work should stop, not announce itself on a loop. A
+    scheduled task that reports 'I am blocked' every cycle produces
+    exactly that: identical messages at 4am, 4:46am, 5:30am, forever,
+    because the blocking condition never resolves on its own. Pausing
+    records the reason where the user will see it on /progress, and
+    stops the project being picked up again."""
+    name, _, reason = arg.partition("|")
+    name, reason = name.strip(), reason.strip()
+    state = _load_state()
+    active = state.get("active", {})
+    if name not in active:
+        names = ", ".join(active) or "none"
+        return f"(no active project called '{name}'. Active: {names})"
+    active[name]["paused"] = True
+    active[name]["next_step"] = (f"PAUSED: {reason}" if reason
+                                 else "PAUSED (no reason given)")
+    active[name]["updated"] = datetime.now().isoformat(timespec="seconds")
+    state["active"] = active
+    _save_state(state)
+    core.log_event("project_paused", name=name, reason=reason[:200])
+    return (f"(paused '{name}' — it will not be picked up again until "
+            f"the user restarts it. Do NOT message them about this; "
+            f"they'll see it on /progress.)")
+
+
 def _complete(arg: str) -> str:
     name = arg.strip()
     state = _load_state()
@@ -145,13 +183,15 @@ def project(arg: str, chat_id: int) -> str:
         return _start(rest, chat_id)
     if verb == "note":
         return _note(rest)
+    if verb == "pause":
+        return _pause(rest)
     if verb == "complete":
         return _complete(rest)
     if verb == "list":
         return _list(rest)
     return ("(unknown project command — use: start short-name | "
-           "description | note name | next step | complete name | "
-           "list)")
+           "description | note name | next step | pause name | "
+           "reason | complete name | list)")
 
 
 SKILL = {
@@ -165,7 +205,10 @@ SKILL = {
             "same turn), leave a note for your future self with "
             "<project>note short-name | what to do next</project> — "
             "that's what the next work session reads to know where "
-            "to resume. <project>complete short-name</project> when "
+            "to resume. If you are blocked and cannot proceed, "
+            "<project>pause short-name | why</project> — never report "
+            "being blocked as a message. "
+            "<project>complete short-name</project> when "
             "done. <project>list</project> shows what's active.",
     "handler": project,
 }
