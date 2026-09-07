@@ -1170,6 +1170,8 @@ def gather_status() -> dict:
         "model": MODEL,
         "vision_model": VISION_MODEL or "disabled",
         "trace_chats": sorted(trace_chats),
+        "sidebar_chats": sorted(c for c, e in sidebar_state.items()
+                                if e.get("on")),
         "num_ctx": NUM_CTX,
         "skills": sorted(TOOLS),
         "stats": {**stats, "tools": dict(stats["tools"])},
@@ -1358,7 +1360,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             cmd_reply = handle_command(message, WEB_CHAT_ID)
             reply = (cmd_reply if cmd_reply is not None
-                     else handle_turn(WEB_CHAT_ID, message, kind="web"))
+                     else route_turn(WEB_CHAT_ID, message, kind="web"))
         except Exception as e:
             log_event("web_chat_error", error=repr(e))
             web_post("me", message)
@@ -1697,6 +1699,253 @@ def remove_pulse_task(name: str) -> str:
     return f"Removed pulse task '{name}'."
 
 
+SIDEBARS_FILE = "sidebars.md"
+SIDEBAR_MAX = 8            # messages kept, so ~4 exchanges of follow-up
+SIDEBAR_IDLE_HOURS = 4     # mode auto-expires after this much silence
+
+# Named sub-agents, defined in sidebars.md the same way pulse tasks
+# are defined in pulse.md — a heading, an optional model: line, then
+# the system prompt. Re-read on every use, so editing the file takes
+# effect on the next message with no restart.
+SIDEBAR_DEF_RE = re.compile(
+    r"^#{2,}[ \t]*(?P<name>[A-Za-z0-9_-]+)[ \t]*\n"
+    r"(?:[ \t]*model:[ \t]*(?P<model>[^\n]+?)[ \t]*\n)?"
+    r"(?P<prompt>.*?)(?=^#{2,}[ \t]*\S|\Z)",
+    re.MULTILINE | re.DOTALL | re.IGNORECASE)
+
+
+def parse_sidebars() -> dict:
+    """name -> {"model": str or "", "prompt": str}. An empty or absent
+    model means the Barrel's own model."""
+    out = {}
+    for m in SIDEBAR_DEF_RE.finditer(read_file(SIDEBARS_FILE)):
+        prompt = m.group("prompt").strip()
+        if not prompt:
+            continue          # a heading with no prompt isn't an agent
+        model = (m.group("model") or "").strip()
+        if model.lower() in ("default", "-", "none"):
+            model = ""
+        out[m.group("name").strip().lower()] = {"model": model,
+                                                "prompt": prompt}
+    return out
+
+
+def _model_missing(model: str) -> str:
+    """Return a help string if the model clearly isn't pulled, else "".
+    Checked when a sidebar is ACTIVATED rather than on the first
+    question, so 'you need to pull this' arrives before you've typed
+    anything into it. Stays silent if Ollama can't be reached — that's
+    a different problem with its own error, and guessing here would
+    just be noise."""
+    if not model:
+        return ""
+    try:
+        r = requests.get(f"{OLLAMA_URL.rstrip('/')}/api/tags", timeout=5)
+        r.raise_for_status()
+        installed = [m.get("name", "") for m in r.json().get("models", [])]
+    except Exception:
+        return ""
+    if model in installed:
+        return ""
+    family = any(m.split(":")[0] == model.split(":")[0] for m in installed)
+    if family:
+        return (f"\u26a0 '{model}' isn't pulled by that exact tag "
+                f"(something similar is). Run: ollama pull {model}")
+    return (f"\u26a0 '{model}' is not installed — run: ollama pull "
+            f"{model}\nUntil then this sidebar will fail to answer.")
+
+
+# Per chat, not global: a sidebar on Telegram must not silently change
+# what the dashboard is talking to.
+#   chat_id -> {"on": bool, "context": str, "convo": list, "last": iso}
+sidebar_state: dict = {}
+
+
+def _sidebar(chat_id: int) -> dict:
+    return sidebar_state.setdefault(
+        chat_id, {"on": False, "context": "", "convo": [], "last": None,
+                  "model": "", "name": ""})
+
+
+def sidebar_answer(chat_id: int, question: str) -> str:
+    """One model call with a MINIMAL prompt — no identity.md, no
+    history.md, no tool descriptions, and none of the main chat's
+    conversation. Two reasons that matters: it's much faster (the full
+    system prompt is thousands of tokens before you've asked
+    anything), and the answer isn't coloured by everything the Barrel
+    knows about you, which is what you want when asking for a neutral
+    read rather than a personalised one.
+
+    /ask and sidebar mode share one per-chat buffer, so /ask is simply
+    a single message through the sidebar, and turning the mode on just
+    means not having to type /ask each time."""
+    entry = _sidebar(chat_id)
+    model = entry.get("model") or MODEL
+    role = entry["context"] or ("You are a helpful assistant.")
+    system = (f"{role}\nToday is {datetime.now():%A %Y-%m-%d}. Answer "
+              f"directly and concisely. You have no memory of any "
+              f"other conversation and no tools available — answer "
+              f"from your own knowledge, and say so if you don't "
+              f"know.")
+    messages = ([{"role": "system", "content": system}]
+                + entry["convo"][-SIDEBAR_MAX:]
+                + [{"role": "user", "content": question}])
+    try:
+        response = ollama.chat(model=model, messages=messages,
+                               options={"num_ctx": NUM_CTX,
+                                        "num_predict": -1})
+    except Exception as e:
+        hint = _model_missing(entry.get("model", ""))
+        return (f"(sidebar failed: {e.__class__.__name__})"
+                + (f"\n{hint}" if hint else ""))
+
+    answer = str(response["message"]["content"]).strip()
+    # No tools exist on this path, so any tag the model emits is
+    # decoration that would only confuse — strip it rather than let a
+    # dangling <search> reach the user with nothing behind it.
+    answer = TOOL_RE.sub("", answer).strip() or "(empty reply)"
+    entry["convo"].append({"role": "user", "content": question})
+    entry["convo"].append({"role": "assistant", "content": answer})
+    del entry["convo"][:-SIDEBAR_MAX]
+    entry["last"] = datetime.now().isoformat(timespec="seconds")
+
+    t_in = _count(response, "prompt_eval_count")
+    t_out = _count(response, "eval_count")
+    track_tokens(t_in, t_out)
+    log_event("sidebar", chat_id=chat_id, question=question[:300],
+              model=model, name=entry.get("name", ""),
+              tokens_in=t_in, tokens_out=t_out)
+    return answer
+
+
+def ask_clean(question: str, chat_id: int = 0) -> str:
+    """/ask — a single question through the sidebar, without turning
+    the mode on."""
+    question = question.strip()
+    if question.lower() in ("clear", "reset"):
+        _sidebar(chat_id)["convo"].clear()
+        return "Sidebar cleared — the next /ask starts fresh."
+    if not question:
+        return ("Usage: /ask <question> — answers with a clean slate: "
+                "none of your saved history, none of this chat's "
+                "context, no tools. /ask clear to reset the sidebar. "
+                "/sidebar keeps every message on that clean slate "
+                "until you turn it off.")
+    return sidebar_answer(chat_id, question)
+
+
+def toggle_sidebar(arg: str, chat_id: int = 0) -> str:
+    """/sidebar — route EVERY message through the clean path until
+    turned off. Human-invoked only, like every other command here: the
+    model cannot switch its own sub-agent, which would be mode
+    confusion with an extra layer.
+
+    Disambiguation rule: a single bare word that matches a heading in
+    sidebars.md loads that sub-agent; anything else is taken as a
+    freeform instruction. That keeps '/sidebar coder' and '/sidebar
+    answer as a historian' both working without a flag to remember."""
+    entry = _sidebar(chat_id)
+    arg = arg.strip()
+    agents = parse_sidebars()
+
+    if arg.lower() == "list":
+        if not agents:
+            return (f"No sub-agents defined yet. Add them to "
+                    f"{SIDEBARS_FILE} next to barrel_v1.py:\n\n"
+                    f"## coder\nmodel: qwen3-coder:30b\n\nYou are a "
+                    f"concise programming assistant.\n\nThen call it "
+                    f"with /sidebar coder.")
+        lines = [f"{len(agents)} sub-agent(s) in {SIDEBARS_FILE}:"]
+        for name, a in agents.items():
+            first = a["prompt"].splitlines()[0][:60]
+            model = a["model"] or "(your Barrel's model)"
+            lines.append(f"- {name} \u2014 {model}\n    {first}")
+        lines.append("Call one with /sidebar <name>, or /sidebar "
+                     "<any instruction> for a one-off.")
+        return "\n".join(lines)
+
+    if entry["on"] and not arg:
+        entry.update({"on": False, "context": "", "convo": [],
+                      "model": "", "name": ""})
+        log_event("sidebar_off", chat_id=chat_id)
+        return ("Sidebar off — back to your Barrel, with its persona, "
+                "memory and tools. The sidebar conversation is "
+                "cleared.")
+
+    # A new sidebar always starts fresh: carrying a previous agent's
+    # answers into a different model or persona would make them look
+    # like its own words, which is exactly wrong when comparing two.
+    entry.update({"on": True, "convo": [],
+                  "last": datetime.now().isoformat(timespec="seconds")})
+
+    named = agents.get(arg.lower()) if arg else None
+    if named:
+        entry.update({"context": named["prompt"],
+                      "model": named["model"], "name": arg.lower()})
+        model_label = named["model"] or "your Barrel's model"
+        warning = _model_missing(named["model"])
+        log_event("sidebar_on", chat_id=chat_id, name=arg.lower(),
+                  model=named["model"])
+        return (f"\U0001f537 Sidebar on \u2014 {arg.lower()}, running "
+                f"{model_label}. Clean slate: no memory of your "
+                f"history, no tools. /sidebar again to switch off."
+                + (f"\n\n{warning}" if warning else ""))
+
+    entry.update({"context": arg, "model": "", "name": ""})
+    log_event("sidebar_on", chat_id=chat_id, context=arg[:200])
+    extra = (f" acting as: {arg}" if arg else "")
+    known = (f"\n(Known sub-agents: {', '.join(agents)} \u2014 or "
+             f"/sidebar list)" if agents and arg else "")
+    return (f"\U0001f537 Sidebar on \u2014 clean slate, no memory of "
+            f"your history, no tools{extra}. Every message goes here "
+            f"until you send /sidebar again. It also switches itself "
+            f"off after {SIDEBAR_IDLE_HOURS}h of silence.{known}")
+
+
+def route_turn(chat_id: int, text: str, kind: str = "chat",
+               on_status=lambda s: None) -> str:
+    """Decide whether an ordinary message goes to the full Barrel or
+    the sidebar. Only user messages come through here — pulse tasks
+    call handle_turn directly, so a sidebar left on can never stop a
+    scheduled task from reaching its tools."""
+    entry = _sidebar(chat_id)
+    if entry["on"] and entry["last"]:
+        try:
+            idle = datetime.now() - datetime.fromisoformat(entry["last"])
+            if idle > timedelta(hours=SIDEBAR_IDLE_HOURS):
+                # Expire rather than let someone return hours later and
+                # silently be talking to a persona-less stranger.
+                entry.update({"on": False, "context": "", "convo": [],
+                              "model": "", "name": ""})
+                log_event("sidebar_expired", chat_id=chat_id)
+                return ("(Sidebar had been idle, so it switched off — "
+                        "you're back with your Barrel. Resend that "
+                        "message, or /sidebar to go back.)\n\n"
+                        + handle_turn(chat_id, text, kind=kind,
+                                      on_status=on_status))
+        except ValueError:
+            pass
+    if entry["on"]:
+        # Marked on every reply: without it, a sidebar left on is
+        # indistinguishable from the Barrel having lost its memory.
+        tag = entry.get("name") or ""
+        model = entry.get("model") or ""
+        # Show the model when it isn't the Barrel's own — with three
+        # answers from three models in a chat, unattributed replies
+        # are useless.
+        if tag and model:
+            label = f"{tag} \u00b7 {model}"
+        elif tag:
+            label = tag
+        elif model:
+            label = model
+        else:
+            label = ""
+        prefix = f"\U0001f537 [{label}] " if label else "\U0001f537 "
+        return prefix + sidebar_answer(chat_id, text)
+    return handle_turn(chat_id, text, kind=kind, on_status=on_status)
+
+
 def cancel_project(name: str) -> str:
     """HUMAN-ONLY: drop a project so it stops being auto-resumed.
     Deterministic code the model cannot invoke, for the same reason
@@ -1727,6 +1976,13 @@ PREFIX_COMMANDS = {
     "/reject": reject_pending,
     "/pulse_remove": remove_pulse_task,
     "/cancel_project": cancel_project,
+}
+
+# Prefix commands that need to know WHICH chat they're in — sidebar
+# state is per-chat, so these can't use the plain table above.
+PREFIX_COMMANDS_CHAT = {
+    "/ask": ask_clean,
+    "/sidebar": toggle_sidebar,
 }
 
 
@@ -1860,6 +2116,11 @@ def handle_command(text: str, chat_id: int = 0):
             return fn("")
         if text.startswith(prefix + " "):
             return fn(text[len(prefix) + 1:])
+    for prefix, fn in PREFIX_COMMANDS_CHAT.items():
+        if text == prefix:
+            return fn("", chat_id)
+        if text.startswith(prefix + " "):
+            return fn(text[len(prefix) + 1:], chat_id)
     return None
 
 
@@ -1948,8 +2209,8 @@ def main() -> None:
                     continue
 
                 typing(chat_id)("")
-                reply = handle_turn(chat_id, msg["text"],
-                                    on_status=typing(chat_id))
+                reply = route_turn(chat_id, msg["text"],
+                                   on_status=typing(chat_id))
                 send_message(chat_id, reply)
             except Exception as e:
                 stats["errors"] += 1

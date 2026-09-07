@@ -99,6 +99,7 @@ Yours, never touched by updates:
   config.json           your tunables, merged over built-in defaults
   identity.md           persona
   pulse.md              scheduled tasks
+  sidebars.md           named sub-agents for /sidebar (optional)
   skills/               your own drop-in skills
   .env / run_barrel.bat your credentials (see step 5)
 
@@ -447,6 +448,38 @@ For work too big for one sitting even with generous limits, the
 project, and a background task picks it up in small chunks over
 time. Send `/progress` any time to see what's actively running right
 now plus any longer projects waiting on their next cycle.
+
+**Asking with a clean slate.** `/ask <question>` puts a question to
+the model directly, with none of your saved history, none of the
+current conversation, no persona and no tools — just the question.
+It's dramatically faster (a couple of hundred characters of prompt
+instead of thousands) and the answer isn't shaped by everything your
+Barrel knows about you, which is what you want when you're after a
+neutral read rather than a personalised one. Follow-up `/ask` calls
+keep continuity with each other but never with the main thread;
+`/ask clear` resets that.
+
+**Sidebar mode.** `/sidebar` routes *every* message down that same
+clean path until you send `/sidebar` again — handy for a run of
+questions where the Barrel's memory of you would only get in the way.
+An optional argument sets who it should be for the duration, e.g.
+`/sidebar Answer as an expert on American History`. Sidebar replies
+are marked with a blue diamond so a mode left on is never mistaken
+for your Barrel losing its memory, it's per-chat (a sidebar on
+Telegram doesn't change the dashboard), it switches itself off after
+4 hours of silence, and scheduled pulse tasks always keep their full
+memory and tools regardless.
+
+**Named sub-agents.** Define them in `sidebars.md` next to
+barrel_v1.py — a `##` heading with a one-word name, an optional
+`model:` line, then the system prompt — and call one with `/sidebar
+coder`. `/sidebar list` shows what's defined. Each gets a clean slate,
+and giving a `model:` lets a sub-agent run a different model entirely
+(a coder model for programming questions, say); the reply is tagged
+with the model name so asking the same question of several models
+gives you attributable answers. A model that isn't pulled is caught
+when you activate the sidebar, with the `ollama pull` line you need.
+The file is re-read on every use, so edits apply immediately.
 
 **Applying changes without a restart.** Send `/reload` to re-read
 config.json and rescan bundled/ and skills/ — new or edited skill
