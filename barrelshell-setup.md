@@ -481,6 +481,17 @@ gives you attributable answers. A model that isn't pulled is caught
 when you activate the sidebar, with the `ollama pull` line you need.
 The file is re-read on every use, so edits apply immediately.
 
+**Rich text on Telegram.** `"rich_text": true` (the default) turns
+the markdown your Barrel naturally writes into Telegram's formatting:
+**bold**, `inline code`, and fenced code blocks with syntax
+highlighting. Markdown headings become bold, since Telegram has no
+headings. Underscore italics are deliberately left alone — filenames
+like `barrel_v1.py` are far too common here to treat underscores as
+markup. Any real HTML in a reply is escaped, so a message about an
+`<html>` file still sends; and if Telegram ever refuses the
+formatting anyway, the message is resent as plain text rather than
+being lost. Set it to `false` for plain text everywhere.
+
 **Applying changes without a restart.** Send `/reload` to re-read
 config.json and rescan bundled/ and skills/ — new or edited skill
 files show up immediately, deleted ones disappear, and most config

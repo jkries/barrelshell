@@ -82,6 +82,7 @@ DEFAULTS = {
     "dashboard_port": 8787,
     "workspace_dir": "workspace",
     "vision_model": "",
+    "rich_text": True,
     "dashboard_token": "",
 }
 
@@ -121,6 +122,7 @@ DASHBOARD_HOST = str(_cfg["dashboard_host"])
 DASHBOARD_PORT = int(_cfg["dashboard_port"])
 WORKSPACE_DIR = str(_cfg["workspace_dir"])
 VISION_MODEL = str(_cfg["vision_model"]).strip()
+RICH_TEXT = bool(_cfg["rich_text"])
 DASHBOARD_TOKEN = str(_cfg["dashboard_token"]).strip()
 
 # Telegram is OPTIONAL. With no token or no allowed IDs, the Barrel
@@ -539,10 +541,11 @@ def build_protocol() -> str:
                            for name, t in TOOLS.items())
     style_note = (
         "You are chatting over Telegram on a phone. Keep replies "
-        "short. Plain text only — no markdown headers or tables."
+        "short. Use **bold** for emphasis and backticks for "
+        "code or filenames; no tables."
         if TELEGRAM_ENABLED else
         "You are chatting in a local web panel in a desktop browser. "
-        "Keep replies reasonably concise. Plain text — no markdown "
+        "Keep replies reasonably concise. Plain text — no "
         "headers or tables; URLs you write are clickable.")
     vision_note = (
         "You cannot see images directly. When the user sends a "
@@ -1448,9 +1451,105 @@ def typing(chat_id: int):
                         action="typing")
 
 
+_FENCE_RE = re.compile(r"```([A-Za-z0-9_+-]*)\n?(.*?)```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+_HEADING_RE = re.compile(r"^#{1,6}[ \t]+(.+?)[ \t]*$", re.MULTILINE)
+
+
+def _esc(text: str) -> str:
+    return (text.replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;"))
+
+
+def to_telegram_html(text: str) -> str:
+    """Convert the markdown the model naturally writes into the small
+    HTML subset Telegram accepts.
+
+    ORDER IS THE WHOLE SAFETY STORY. This Barrel writes HTML files and
+    talks about them constantly, so a reply routinely contains real
+    tags like <html> or <div>. Telegram rejects an entire message with
+    a 400 if it can't parse the entities, which would mean the reply
+    never arrives at all — far worse than a stray asterisk. So: pull
+    code out first, escape EVERYTHING, and only then add the handful
+    of tags we actually want.
+
+    Deliberately NOT converted: _underscore italics_. Filenames like
+    barrel_v1.py and project_state.json are everywhere here, and
+    treating those underscores as markup would mangle them."""
+    blocks = []
+
+    def _stash_fence(m):
+        lang, body = m.group(1), m.group(2)
+        cls = f' class="language-{lang}"' if lang else ""
+        blocks.append(f"<pre><code{cls}>{_esc(body.rstrip())}</code></pre>")
+        return f"\x00{len(blocks) - 1}\x00"
+
+    def _stash_inline(m):
+        blocks.append(f"<code>{_esc(m.group(1))}</code>")
+        return f"\x00{len(blocks) - 1}\x00"
+
+    text = _FENCE_RE.sub(_stash_fence, text)
+    text = _INLINE_CODE_RE.sub(_stash_inline, text)
+    text = _esc(text)
+    # Telegram has no headings; bold is the closest honest equivalent.
+    text = _HEADING_RE.sub(r"<b>\1</b>", text)
+    text = _BOLD_RE.sub(r"<b>\1</b>", text)
+    for i, block in enumerate(blocks):
+        text = text.replace(f"\x00{i}\x00", block)
+    return text
+
+
+def _chunk(text: str, limit: int = 3800) -> list:
+    """Split on line boundaries rather than mid-character, and repair
+    any <pre> block the split lands inside by closing it at the end of
+    one chunk and reopening it at the start of the next. Telegram
+    parses each message independently, so half a tag pair in each
+    chunk means it rejects both — a long code block is exactly the
+    case where that would bite."""
+    if len(text) <= limit:
+        return [text]
+    chunks, current = [], ""
+    for line in text.splitlines(keepends=True):
+        if len(current) + len(line) > limit and current:
+            chunks.append(current)
+            current = ""
+        while len(line) > limit:          # a single enormous line
+            chunks.append(line[:limit])
+            line = line[limit:]
+        current += line
+    if current:
+        chunks.append(current)
+
+    repaired, open_pre = [], False
+    for part in chunks:
+        if open_pre:
+            part = "<pre><code>" + part
+        opens = part.count("<pre>")
+        closes = part.count("</pre>")
+        if opens > closes:
+            part += "</code></pre>"
+            open_pre = True
+        elif closes >= opens and open_pre and closes > 0:
+            open_pre = False
+        repaired.append(part)
+    return repaired
+
+
 def send_message(chat_id: int, text: str) -> None:
-    for i in range(0, len(text), 4000):
-        tg("sendMessage", chat_id=chat_id, text=text[i:i + 4000])
+    for part in _chunk(text):
+        if RICH_TEXT:
+            try:
+                tg("sendMessage", chat_id=chat_id,
+                   text=to_telegram_html(part), parse_mode="HTML")
+                continue
+            except requests.RequestException as e:
+                # Telegram refused the markup. The message itself still
+                # has to arrive — guaranteeing delivery matters more
+                # than formatting it, so fall back to plain text rather
+                # than trusting the converter to be perfect.
+                log_event("rich_text_fallback", error=str(e)[:200])
+        tg("sendMessage", chat_id=chat_id, text=part)
 
 
 # ------------------------------------------------- web chat delivery
@@ -2000,6 +2099,7 @@ _RELOADABLE_CONFIG = [
     ("pulse_check_seconds", "PULSE_CHECK_SECONDS", int),
     ("workspace_dir", "WORKSPACE_DIR", str),
     ("vision_model", "VISION_MODEL", lambda v: str(v).strip()),
+    ("rich_text", "RICH_TEXT", bool),
     ("dashboard_token", "DASHBOARD_TOKEN", lambda v: str(v).strip()),
 ]
 # Bound at process start (the socket is already listening) — these
