@@ -355,13 +355,11 @@ def run_pulse(arg: str, chat_id: int) -> str:
         try:
             deliver(PULSE_CHAT_ID,
                     f"\U0001f552 Proposed pulse task '{name}' "
-                    f"({cron}):\n{prompt}\n\nSend /approve "
-                    f"{name} to enable or /reject {name} to "
-                    f"discard.", "pulse")
+                    f"({cron}):\n{prompt}\n\nSend /approve to enable or /reject to discard it.", "pulse")
         except Exception as e:
             print(f"pulse proposal notify failed: {e!r}")
         return (f"(proposed '{name}' — it is NOT active yet. The user "
-                f"must send /approve {name} to enable it; tell them "
+                f"must send /approve to enable it; tell them "
                 f"so.)")
 
     return "(unknown pulse command — use: add name | cron | prompt, "\
