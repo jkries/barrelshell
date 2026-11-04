@@ -41,7 +41,8 @@ That makes it a working personal assistant *and* a teaching tool.
   JavaScript pages, check the weather, do exact math,
   handle timezones, and set one-off reminders
 - **Act on its own** on a schedule — morning briefings, weekly reviews,
-  a nudge at 3pm — including a task that fires on startup
+  a nudge at 3pm — including startup tasks, one-time tasks, and automatic
+  cleanup of tasks with explicit expirations
 - **Work with files** in a sandboxed workspace, and send images, audio,
   or documents back to you in chat
 - **See images** you send it (optional, via any vision-capable local
@@ -213,6 +214,20 @@ limits and security details, see **[FETCHING.md](FETCHING.md)**.
 
 Scanned/image-only PDFs still need OCR, which is not included. Browser
 rendering does not bypass logins, paywalls, CAPTCHAs or anti-bot controls.
+
+## Managing scheduled tasks
+
+Type `/pulse list` to see task names and expiration dates, then
+`/pulse remove NAME` to remove one exact task. `/pulse_remove NAME`
+also remains supported. `/pulse cleanup` immediately removes expired
+or completed tasks; the scheduler does this automatically too.
+
+In `pulse.md`, an optional `expires:` field directly below `schedule:`
+sets a cutoff. A date alone includes that entire local day. For one-time
+agent work, use `schedule: @once YYYY-MM-DD HH:MM`; it removes itself
+after successful execution. Existing recurring tasks without expiration
+are retained. See **[pulse-guide.md](pulse-guide.md)** for examples, approval rules,
+retry behavior, and upgrade instructions.
 
 ## Hardware
 

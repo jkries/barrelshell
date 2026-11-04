@@ -12,6 +12,17 @@ is worth sending, it replies PULSE_OK and stays silent.
 This file is re-read every cycle — edits take effect without a
 restart.
 
+For a temporary task, put an optional `expires: YYYY-MM-DD` or ISO
+timestamp directly after its schedule line, before the blank line.
+A date-only expiry includes the whole day. Expired tasks are removed
+automatically. Use `@once YYYY-MM-DD HH:MM` for one-time agent work;
+it removes itself after a successful run. Without an expiration,
+recurring tasks are retained.
+
+Manage tasks in chat with `/pulse list`, `/pulse remove exact-name`,
+and `/pulse cleanup` (`/pulse_remove exact-name` also works).
+See pulse-guide.md for examples, timezone rules and retry/cancellation limits.
+
 ## morning-brief
 schedule: 0 7 * * 1-5
 

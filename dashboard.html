@@ -170,7 +170,8 @@ async function refresh() {
       m => `until ${m.keeps_until}`,
     ], "nothing loaded");
     const pulseRows = (s.pulse_tasks || []).map(p => ({
-      a: p.name, b: p.schedule,
+      a: p.name,
+      b: p.schedule + (p.expires ? ` | expires ${p.expires.slice(0, 16)}${p.expired ? " (expired)" : ""}` : ""),
       c: (p.last_run || "never").slice(0, 16) }))
       .concat((s.pulse_problems || []).map(p => ({ a: "\u26a0", b: p, c: "" })));
     listRows("t-pulse", pulseRows,

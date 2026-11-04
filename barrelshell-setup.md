@@ -431,6 +431,16 @@ you don't need to touch Task Scheduler — just end the python process
 in Task Manager, and the loop relaunches it with your changes five
 seconds later.
 
+**Managing scheduled tasks.** `/pulse list` shows exact task names and
+expiration dates. Remove one with `/pulse remove NAME` (the older
+`/pulse_remove NAME` alias still works). `/pulse cleanup` removes expired
+or completed tasks immediately; cleanup also runs automatically each cycle.
+Use an `expires:` field directly below a task's `schedule:` for an explicit
+cutoff, or `schedule: @once YYYY-MM-DD HH:MM` for work that removes itself
+after one successful run. Deploy `pulse_tasks.py` with the updated core and
+restart after code updates; do not overwrite your personal `pulse.md`.
+See [pulse-guide.md](pulse-guide.md) for examples and retry/cancellation limitations.
+
 **Seeing what your Barrel is doing.** Send `/trace` in any chat to
 switch on a live debugging view: each skill as it fires, which file it
 came from, a preview of what it returned, and a round/token summary at

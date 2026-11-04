@@ -50,6 +50,8 @@ import requests
 from croniter import croniter
 from ddgs import DDGS
 
+import pulse_tasks as pulse_format
+
 # Bundled skills import barrel_v1. When launched as a script, give them the
 # running module instead of accidentally creating a second core/config/state.
 if __name__ == "__main__":
@@ -320,60 +322,69 @@ def _sniff_ext(path: str) -> str:
 PULSE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 
 
+def _validated_pulse_proposal(name, cron, prompt, expires=None, now=None):
+    now = now or datetime.now()
+    if not PULSE_NAME_RE.fullmatch(name):
+        raise ValueError("task names need lowercase letters, digits/hyphens, 2-41 characters")
+    if not isinstance(cron, str) or len(cron) > 256 or not valid_schedule(cron):
+        raise ValueError("invalid schedule; use cron, @reboot, @every 30m, @idle 4h or @once YYYY-MM-DD HH:MM")
+    if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 8000:
+        raise ValueError("task prompt must contain 1-8000 characters")
+    if pulse_format.HEADING_RE.search(prompt):
+        raise ValueError("task prompts cannot contain ## headings (reserved for task boundaries)")
+    kind, when = schedule_kind(cron)
+    if kind == "once" and when <= now:
+        raise ValueError("the @once time has passed; propose a future time")
+    if expires is not None:
+        expires = pulse_format.parse_time(expires, end_of_date=True).isoformat(timespec="seconds")
+        if pulse_format.parse_time(expires) <= now:
+            raise ValueError("the expiration has already passed")
+        if kind == "once" and pulse_format.parse_time(expires) <= when:
+            raise ValueError("expires must be after the @once time")
+    return {"cron": cron.strip(), "prompt": prompt.strip(), "expires": expires}
+
+
 def run_pulse(arg: str, chat_id: int) -> str:
-    """Trust-tier three: the model may PROPOSE a scheduled task but can
-    never activate one. Proposals land in pulse_pending.json and the
-    user is notified; only the deterministic /approve command — which
-    runs in code the model cannot invoke or fake — writes pulse.md.
-    This keeps prompt injection from persisting behavior."""
+    """Models can propose additions and list tasks, never activate/remove them."""
     verb, _, rest = arg.strip().partition(" ")
     verb, rest = verb.lower(), rest.strip()
-
     if verb == "list":
-        active = [f"- {t['name']} ({t['cron']}) [active]"
-                  for t in parse_pulse()]
-        pending = [f"- {n} ({p['cron']}) [PENDING /approve {n}]"
-                   for n, p in load_json(PENDING_PULSE_FILE, {}).items()]
-        return "\n".join(active + pending) or "(no pulse tasks)"
-
-    if verb == "add":
-        parts = [p.strip() for p in rest.split("|", 2)]
-        if len(parts) != 3 or not all(parts):
-            return ("(bad format — use: add task-name | cron | "
-                    "what to do)")
-        name, cron, prompt = parts
-        name = name.lower()
-        if not PULSE_NAME_RE.match(name):
-            return ("(bad task name — lowercase letters, digits, "
-                    "hyphens, 2-41 chars)")
-        if not valid_schedule(cron):
-            return (f"(invalid schedule '{cron}' — use cron like "
-                    f"'0 15 * * *', or @reboot, or @every 30m, or "
-                    f"@idle 4h; duration units are m/h/d)")
-        if any(t["name"] == name for t in parse_pulse()):
+        return list_pulse_tasks()
+    if verb in ("remove", "delete", "cleanup"):
+        command = f"/pulse remove {rest}" if verb != "cleanup" else "/pulse cleanup"
+        return f"(not changed: only the human can remove tasks. Ask them to send {command})"
+    if verb != "add":
+        return "(use add name | schedule | prompt [| expires: YYYY-MM-DD], or list)"
+    expires = None
+    before, separator, suffix = rest.rpartition("|")
+    if separator and suffix.strip().lower().startswith("expires:"):
+        expires = suffix.strip().split(":", 1)[1].strip()
+        rest = before
+    parts = [p.strip() for p in rest.split("|", 2)]
+    if len(parts) != 3 or not all(parts):
+        return "(use add name | schedule | prompt [| expires: YYYY-MM-DD])"
+    name, cron, prompt = parts
+    name = name.lower()
+    try:
+        task = _validated_pulse_proposal(name, cron, prompt, expires)
+    except (ValueError, OverflowError) as e:
+        return f"(pulse proposal refused: {e})"
+    with pulse_format.LOCK:
+        if any(n.casefold() == name for n, _, _ in pulse_format.sections(pulse_format.read_text(PULSE_FILE))):
             return f"(a task named '{name}' already exists in pulse.md)"
-        pending = load_json(PENDING_PULSE_FILE, {})
+        pending = _load_pulse_pending()
         if name in pending:
-            return (f"('{name}' is already proposed and awaiting "
-                    f"/approve {name})")
-        pending[name] = {"cron": cron, "prompt": prompt,
-                         "proposed": datetime.now().isoformat(
-                             timespec="seconds")}
-        save_json(PENDING_PULSE_FILE, pending)
-        log_event("pulse_proposed", name=name, cron=cron,
-                  prompt=prompt[:200])
-        try:
-            deliver(PULSE_CHAT_ID,
-                    f"\U0001f552 Proposed pulse task '{name}' "
-                    f"({cron}):\n{prompt}\n\nSend /approve to enable or /reject to discard it.", "pulse")
-        except Exception as e:
-            print(f"pulse proposal notify failed: {e!r}")
-        return (f"(proposed '{name}' — it is NOT active yet. The user "
-                f"must send /approve to enable it; tell them "
-                f"so.)")
-
-    return "(unknown pulse command — use: add name | cron | prompt, "\
-           "or list)"
+            return f"('{name}' is awaiting /approve {name})"
+        pending[name] = {**task, "proposed": datetime.now().isoformat(timespec="seconds")}
+        pulse_format.save_json(PENDING_PULSE_FILE, pending)
+    log_event("pulse_proposed", name=name, cron=cron, expires=task["expires"], prompt=prompt[:200])
+    expiry_note = f"\nExpires: {task['expires']}" if task["expires"] else ""
+    try:
+        deliver(PULSE_CHAT_ID, f"Proposed pulse task '{name}' ({cron}){expiry_note}:\n{prompt}\n\n"
+                f"Send /approve {name} to enable or /reject {name} to discard it.", "pulse")
+    except Exception as e:
+        print(f"pulse proposal notify failed: {e!r}")
+    return f"(proposed '{name}' — NOT active. The human must send /approve {name}.)"
 
 
 # ---------------------------------------------------- tool: self-status
@@ -442,11 +453,14 @@ TOOLS: dict = {
                 "<pulse>add task-name | schedule | what to "
                 "do</pulse>, or <pulse>list</pulse>. The schedule is "
                 "cron ('0 15 * * *' = 3pm daily), @reboot (on "
-                "startup), @every 30m (repeating interval), or "
-                "@idle 4h (once after that long with no contact from "
-                "the user). Duration units are m, h, d. "
-                "Use when asked for something daily, weekly, or "
-                "recurring.",
+                "startup), @every 30m (repeating interval), "
+                "@idle 4h (once per idle period), or @once YYYY-MM-DD HH:MM "
+                "(one-time; removed after success). Duration units are m/h/d. "
+                "For temporary tasks append | expires: YYYY-MM-DD or an ISO "
+                "timestamp before </pulse>. A date expires AFTER that whole "
+                "local day. Never infer expiry from prompt text. "
+                "To remove a task, list exact names then ask the human to send "
+                "/pulse remove NAME. Only the human can remove tasks directly.",
     },
     "status": {
         "handler": run_status,
@@ -674,7 +688,9 @@ def save_fact(fact: str) -> None:
 
 
 conversations: dict[int, list[dict]] = {}
-agent_lock = threading.Lock()
+# Reentrant so a queued scheduled task can validate itself after obtaining
+# the agent lock, then enter handle_turn without a second-lock deadlock.
+agent_lock = threading.RLock()
 
 # Lightweight runtime counters for the dashboard.
 stats: dict = {"turns": 0, "facts_saved": 0, "errors": 0, "tools": {},
@@ -983,15 +999,9 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
 
 # =============================================================== pulse
 
-PULSE_TASK_RE = re.compile(
-    r"^#{2,}[ \t]*(?P<name>\S[^\n]*?)[ \t]*\n"      # ## task name
-    r"\s*schedule:[ \t]*(?P<cron>[^\n]+?)[ \t]*(?:\n|\Z)"
-    r"(?P<prompt>.*?)(?=^#{2,}[ \t]*\S|\Z)",
-    re.MULTILINE | re.DOTALL | re.IGNORECASE)
-
-# Any heading at all — used to catch entries that LOOK like tasks but
-# don't parse, so a typo never fails silently again.
-PULSE_HEADING_RE = re.compile(r"^#{2,}[ \t]*(\S[^\n]*)$", re.MULTILINE)
+# Format and atomic file helpers are independent of the model runtime.
+PULSE_HEADING_RE = pulse_format.HEADING_RE
+_pulse_running: dict[str, str] = {}  # name.casefold() -> task fingerprint
 
 pulse_problems: list[str] = []   # surfaced in /pulse and the dashboard
 _pulse_warned: set = set()
@@ -1009,34 +1019,31 @@ def _pulse_warn(msg: str) -> None:
 last_contact_at: datetime = datetime.now()
 
 
-DURATION_RE = re.compile(r"(\d+)\s*([mhd])", re.IGNORECASE)
-LAST_CONTACT_KEY = "_last_user_contact"   # stored in pulse_state.json
+DURATION_RE = pulse_format.DURATION_RE
+LAST_CONTACT_KEY = pulse_format.LAST_CONTACT_KEY
+parse_duration = pulse_format.parse_duration
+schedule_kind = pulse_format.schedule_kind
 
 
-def parse_duration(text: str):
-    """'30m' / '4h' / '3d' -> timedelta. None if it isn't a duration."""
-    m = DURATION_RE.fullmatch(text.strip())
-    if not m:
+def _load_pulse_state():
+    state = pulse_format.load_json(PULSE_STATE_FILE, {})
+    return state if isinstance(state, dict) else {}
+
+
+def _load_pulse_pending():
+    pending = pulse_format.load_json(PENDING_PULSE_FILE, {})
+    return pending if isinstance(pending, dict) else {}
+
+
+def _pulse_last_run(task, state):
+    value = state.get(task["name"])
+    if value is None:
         return None
-    n, unit = int(m.group(1)), m.group(2).lower()
-    if n <= 0:
+    try:
+        return pulse_format.parse_time(value, require_time=True)
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        _pulse_warn(f"task '{task['name']}': invalid last-run state — re-arming")
         return None
-    return {"m": timedelta(minutes=n), "h": timedelta(hours=n),
-            "d": timedelta(days=n)}[unit]
-
-
-def schedule_kind(cron: str):
-    """Classify a schedule line. Returns (kind, duration|None), where
-    kind is 'reboot', 'every', 'idle', 'cron', or None if invalid."""
-    c = cron.strip()
-    low = c.lower()
-    if low == "@reboot":
-        return ("reboot", None)
-    for prefix, kind in (("@every", "every"), ("@idle", "idle")):
-        if low.startswith(prefix):
-            d = parse_duration(c[len(prefix):])
-            return (kind, d) if d else (None, None)
-    return ("cron", None) if croniter.is_valid(c) else (None, None)
 
 
 def valid_schedule(cron: str) -> bool:
@@ -1045,59 +1052,88 @@ def valid_schedule(cron: str) -> bool:
 
 def task_is_due(task: dict, state: dict, now: datetime,
                 last_contact: datetime) -> bool:
-    """Whether a scheduled task should fire right now.
-
-    @every N — fires N after its own last run (relative), unlike cron
-      which fires at fixed clock times.
-    @idle N  — fires once when there has been no user contact for N.
-      It won't fire again until you talk to the Barrel, so a long
-      silence produces one message, not a nag every N.
-    """
-    kind, dur = schedule_kind(task["cron"])
-    last_iso = state.get(task["name"])
-
+    if pulse_format.expired(task, now) or pulse_format.completed(task, state):
+        return False
+    kind, value = schedule_kind(task["cron"])
+    last = _pulse_last_run(task, state)
+    if kind == "once":
+        return now >= value  # missed runs catch up unless explicitly expired
     if kind == "idle":
-        if now - last_contact < dur:
-            return False
-        # Require contact since the last firing → once per idle period.
-        if last_iso and datetime.fromisoformat(last_iso) >= last_contact:
-            return False
-        return True
-
+        return now - last_contact >= value and (last is None or last < last_contact)
     if kind == "every":
-        if last_iso is None:
-            return False          # arm from now; don't fire on sight
-        return now - datetime.fromisoformat(last_iso) >= dur
-
-    last = datetime.fromisoformat(last_iso) if last_iso else now
-    return now >= croniter(task["cron"], last).get_next(datetime)
+        return last is not None and now - last >= value
+    if kind == "cron":
+        try:
+            return last is not None and now >= croniter(task["cron"], last).get_next(datetime)
+        except (ValueError, OverflowError):
+            return False
+    return False  # @reboot is handled only on startup
 
 
 def parse_pulse() -> list[dict]:
-    text = read_file(PULSE_FILE)
-    tasks, seen = [], set()
-    for m in PULSE_TASK_RE.finditer(text):
-        name = m.group("name").strip()
-        cron = m.group("cron").strip()
-        seen.add(name)
-        if not valid_schedule(cron):
-            _pulse_warn(f"task '{name}': invalid schedule '{cron}' — use "
-                        f"cron (0 15 * * *), @reboot, @every 30m, or "
-                        f"@idle 4h (units: m/h/d)")
-            continue
-        tasks.append({"name": name, "cron": cron,
-                      "prompt": m.group("prompt").strip()})
-    # Loud about headings that never became tasks — a missing or
-    # misspelled 'schedule:' line used to vanish without a trace.
-    for heading in PULSE_HEADING_RE.findall(text):
-        if heading.strip() not in seen:
-            _pulse_warn(f"'{heading.strip()}' has no valid 'schedule:' "
-                        f"line on the following line — ignored")
-    live = {t["name"] for t in tasks}
-    pulse_problems[:] = [p for p in sorted(_pulse_warned)
-                         if not any(f"'{n}'" in p and "invalid" not in p
-                                    for n in live)]
-    return tasks
+    with pulse_format.LOCK:
+        tasks, problems = pulse_format.parse(pulse_format.read_text(PULSE_FILE))
+        for problem in problems:
+            _pulse_warn(problem)
+        pulse_problems[:] = problems  # resolved warnings must disappear
+        return tasks
+
+
+def list_pulse_tasks() -> str:
+    now = datetime.now()
+    with pulse_format.LOCK:
+        tasks = parse_pulse()
+        pending = _load_pulse_pending()
+        lines = []
+        for task in tasks:
+            expires = f"; expires {task['expires']}" if task.get("expires") else ""
+            status = "expired; awaiting cleanup" if pulse_format.expired(task, now) else "active"
+            lines.append(f"- {task['name']}: {task['cron']}{expires} [{status}]")
+        for name, task in pending.items():
+            if isinstance(task, dict):
+                expires = f"; expires {task['expires']}" if task.get("expires") else ""
+                lines.append(f"- {name}: {task.get('cron', '?')}{expires} [PENDING /approve {name}]")
+        lines += [f"Warning: {p}" for p in pulse_problems]
+    summary = "\n".join(lines) or "(no pulse tasks)"
+    return summary + "\nManage: /pulse remove <exact-name> | /pulse cleanup"
+
+
+def cleanup_expired_pulse(now=None) -> list[str]:
+    """Remove only explicit expirations or confirmed completed one-time tasks."""
+    now = now or datetime.now()
+    with pulse_format.LOCK:
+        text = pulse_format.read_text(PULSE_FILE)
+        tasks = parse_pulse()
+        state = _load_pulse_state()
+        reasons = {task['name']: ("expired" if pulse_format.expired(task, now) else "completed")
+                   for task in tasks if pulse_format.expired(task, now) or pulse_format.completed(task, state)}
+        if reasons:
+            new_text, removed = pulse_format.remove_sections(text, reasons)
+            # Refuse to overwrite an external editor's changes made mid-read.
+            if pulse_format.read_text(PULSE_FILE) != text:
+                raise OSError("pulse.md changed during cleanup; retry next cycle")
+            pulse_format.atomic_write(PULSE_FILE, new_text)
+            pulse_format.forget_state(state, removed)
+            pulse_format.save_json(PULSE_STATE_FILE, state)
+            for name in removed:
+                log_event("pulse_removed", name=name, reason=reasons[name], automatic=True)
+        pending = _load_pulse_pending()
+        dropped = []
+        for name, task in pending.items():
+            if not isinstance(task, dict):
+                continue
+            try:
+                kind, when = schedule_kind(task.get("cron", ""))
+                if pulse_format.expired(task, now) or (kind == "once" and when <= now):
+                    dropped.append(name)
+            except (ValueError, TypeError, AttributeError, OverflowError):
+                continue  # invalid metadata must be repaired/rejected, not guessed
+        if dropped:
+            for name in dropped:
+                pending.pop(name)
+                log_event("pulse_pending_expired", name=name)
+            pulse_format.save_json(PENDING_PULSE_FILE, pending)
+        return list(reasons) + [f"{name} (pending)" for name in dropped]
 
 
 def fire_due_reminders() -> None:
@@ -1115,93 +1151,136 @@ def fire_due_reminders() -> None:
         save_json(REMINDERS_FILE, keep)
 
 
-def fire_task(task: dict, state: dict, now: datetime) -> None:
-    log_event("pulse_fired", task=task["name"])
-    prompt = (f"[PULSE: {task['name']}] It is "
-              f"{now.strftime('%A %Y-%m-%d %H:%M')}. "
-              f"Task: {task['prompt']}")
-    try:
-        reply = handle_turn(PULSE_CHAT_ID, prompt, kind="pulse")
-        # PULSE_OK is meant to BE the whole reply when there's nothing
-        # to report, but the model decorates it in ways that are
-        # obviously still the sentinel: <PULSE_OK> (treating it as a
-        # tag, unsurprising given every tool call in the protocol is
-        # one), **PULSE_OK**, `PULSE_OK`, trailing punctuation, or a
-        # stray remark on a line above it. Compare the LAST LINE with
-        # all non-alphanumerics removed, so any wrapping is ignored.
-        # Still safe against a reply that legitimately mentions the
-        # word mid-sentence — that line normalizes to far more than
-        # just "PULSEOK" and so won't match.
-        stripped = reply.strip()
-        last_line = stripped.splitlines()[-1] if stripped else ""
-        normalized = re.sub(r"[^A-Za-z0-9]", "", last_line).upper()
-        if normalized != "PULSEOK":
-            deliver(PULSE_CHAT_ID, reply, "pulse")
-    except Exception as e:
-        print(f"pulse: '{task['name']}' failed: {e}")
-    state[task["name"]] = now.isoformat()
-    save_json(PULSE_STATE_FILE, state)
+def fire_task(task: dict, state=None, now=None, *, startup=False) -> bool:
+    """Revalidate after waiting for the model; never resurrect deleted state.
+
+    The optional state argument is retained for older callers, but disk state
+    is always reloaded. Cancellation cannot interrupt an already-running turn.
+    """
+    fixed_now = now
+    with agent_lock:
+        now = now or datetime.now()
+        with pulse_format.LOCK:
+            current = next((t for t in parse_pulse() if t['name'] == task['name']), None)
+            if current is None or pulse_format.fingerprint(current) != pulse_format.fingerprint(task):
+                return False
+            state = _load_pulse_state()
+            if pulse_format.expired(current, now) or pulse_format.completed(current, state):
+                return False
+            kind = schedule_kind(current['cron'])[0]
+            if kind == 'reboot':
+                last = _pulse_last_run(current, state)
+                if not startup or (last is not None and now - last < timedelta(minutes=10)):
+                    return False
+            elif not task_is_due(current, state, now, last_contact_at):
+                return False
+            _pulse_running[task['name'].casefold()] = pulse_format.fingerprint(current)
+        succeeded = False
+        try:
+            log_event('pulse_fired', task=task['name'])
+            prompt = (f"[PULSE: {task['name']}] It is {now.strftime('%A %Y-%m-%d %H:%M')}. "
+                      f"Task: {task['prompt']}")
+            reply = handle_turn(PULSE_CHAT_ID, prompt, kind='pulse')
+            stripped = reply.strip()
+            last_line = stripped.splitlines()[-1] if stripped else ''
+            normalized = re.sub(r'[^A-Za-z0-9]', '', last_line).upper()
+            if normalized != 'PULSEOK':
+                deliver(PULSE_CHAT_ID, reply, 'pulse')
+            succeeded = True
+        except Exception as e:
+            print(f"pulse: '{task['name']}' failed: {e}")
+            log_event('pulse_error', task=task['name'], error=repr(e))
+        finally:
+            with pulse_format.LOCK:
+                _pulse_running.pop(task['name'].casefold(), None)
+                current = next((t for t in parse_pulse() if t['name'] == task['name']), None)
+                # A human may have removed or edited it during execution.
+                if current is not None and pulse_format.fingerprint(current) == pulse_format.fingerprint(task):
+                    state = _load_pulse_state()
+                    state[task['name']] = (fixed_now or datetime.now()).isoformat()
+                    if succeeded and kind == 'once':
+                        markers = state.get(pulse_format.COMPLETED_KEY)
+                        if not isinstance(markers, dict):
+                            markers = {}
+                        markers[task['name']] = pulse_format.fingerprint(task)
+                        state[pulse_format.COMPLETED_KEY] = markers
+                    pulse_format.save_json(PULSE_STATE_FILE, state)
+                    if succeeded and kind == 'once':
+                        # Persist completion first, so a cleanup failure/restart
+                        # does not execute the successful one-time task again.
+                        cleanup_expired_pulse(fixed_now or datetime.now())
+        return succeeded
+
+
+def pulse_tick(now=None, *, startup=False):
+    """One testable scheduling cycle; do not cache mutable state across cycles."""
+    fixed_now = now
+    now = now or datetime.now()
+    with pulse_format.LOCK:
+        cleanup_expired_pulse(now)
+        state = _load_pulse_state()
+        tasks = parse_pulse()
+        changed = False
+        if state.get(LAST_CONTACT_KEY) != last_contact_at.isoformat():
+            state[LAST_CONTACT_KEY] = last_contact_at.isoformat()
+            changed = True
+        due = []
+        for task in tasks:
+            kind = schedule_kind(task['cron'])[0]
+            if startup:
+                last = _pulse_last_run(task, state)
+                if kind == 'reboot' and (last is None or now - last >= timedelta(minutes=10)):
+                    due.append(task)
+                continue
+            if kind == 'reboot':
+                continue
+            if task_is_due(task, state, now, last_contact_at):
+                due.append(task)
+            elif kind in ('cron', 'every') and _pulse_last_run(task, state) is None:
+                state[task['name']] = now.isoformat()  # arm new cron/interval tasks
+                changed = True
+        if changed:
+            pulse_format.save_json(PULSE_STATE_FILE, state)
+    for task in due:
+        fire_task(task, now=fixed_now, startup=startup)
 
 
 def pulse_loop() -> None:
-    if not PULSE_CHAT_ID:
-        print("pulse: no PULSE_CHAT_ID; pulse disabled")
+    # Dashboard chat ID 0 is valid; falsy does not mean disabled.
+    if PULSE_CHAT_ID is None:
+        print('pulse: no delivery target; pulse disabled')
         return
-    print("pulse: scheduler started")
-    state = load_json(PULSE_STATE_FILE, {})
-    # Idle is measured from the last time a human actually said
-    # something. Persisted, so a restart doesn't fake fresh contact.
+    print('pulse: scheduler started')
     global last_contact_at
+    with pulse_format.LOCK:
+        state = _load_pulse_state()
+        try:
+            if state.get(LAST_CONTACT_KEY):
+                last_contact_at = pulse_format.parse_time(state[LAST_CONTACT_KEY], require_time=True)
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            pass
     try:
-        if state.get(LAST_CONTACT_KEY):
-            last_contact_at = datetime.fromisoformat(state[LAST_CONTACT_KEY])
-    except ValueError:
-        pass
-
-    # @reboot tasks: fire once, now. The 10-minute guard matters —
-    # without it, a crash-looping bot would announce "I'm back!"
-    # every restart cycle, forever.
-    startup = datetime.now()
-    for task in parse_pulse():
-        if schedule_kind(task["cron"])[0] != "reboot":
-            continue
-        last_iso = state.get(task["name"])
-        if last_iso and (startup - datetime.fromisoformat(last_iso)
-                         < timedelta(minutes=10)):
-            print(f"pulse: skipping @reboot '{task['name']}' "
-                  f"(fired recently — crash-loop guard)")
-            continue
-        fire_task(task, state, startup)
-
+        pulse_tick(startup=True)
+    except Exception as e:
+        log_event('pulse_error', phase='startup', error=repr(e))
+        print(f'pulse: startup check failed: {e}')
     while True:
-        now = datetime.now()
         try:
             fire_due_reminders()
         except Exception as e:
-            print(f"pulse: reminder check failed: {e}")
-
-        last_contact = last_contact_at
-        if state.get(LAST_CONTACT_KEY) != last_contact.isoformat():
-            state[LAST_CONTACT_KEY] = last_contact.isoformat()
-            save_json(PULSE_STATE_FILE, state)
-
-        for task in parse_pulse():
-            kind = schedule_kind(task["cron"])[0]
-            if kind == "reboot":
-                continue  # handled at startup, not on a schedule
-            if task_is_due(task, state, now, last_contact):
-                fire_task(task, state, now)
-            elif state.get(task["name"]) is None:
-                # New task: arm from now so it never back-fires.
-                state[task["name"]] = now.isoformat()
-                save_json(PULSE_STATE_FILE, state)
+            print(f'pulse: reminder check failed: {e}')
+        try:
+            pulse_tick()
+        except Exception as e:
+            log_event('pulse_error', phase='tick', error=repr(e))
+            print(f'pulse: scheduler check failed: {e}')
         time.sleep(PULSE_CHECK_SECONDS)
 
 # ============================================================ dashboard
 
 def gather_status() -> dict:
     now = datetime.now()
-    ps_state = load_json(PULSE_STATE_FILE, {})
+    ps_state = _load_pulse_state()
     status = {
         "status": "online",
         "started": START_TIME.isoformat(timespec="seconds"),
@@ -1217,6 +1296,8 @@ def gather_status() -> dict:
         "conversations_in_ram": {str(cid): len(c)
                                  for cid, c in conversations.items()},
         "pulse_tasks": [{"name": t["name"], "schedule": t["cron"],
+                         "expires": t.get("expires"),
+                         "expired": pulse_format.expired(t, now),
                          "last_run": ps_state.get(t["name"])}
                         for t in parse_pulse()],
         "pending_reminders": load_json(REMINDERS_FILE, []),
@@ -1821,9 +1902,7 @@ def show_progress() -> str:
 
 COMMANDS = {
     "/history": lambda: read_file(HISTORY_FILE, "(no history yet)"),
-    "/pulse": lambda: "\n".join(
-        [f"{t['name']}: {t['cron']}" for t in parse_pulse()]
-        + [f"\u26a0 {p}" for p in pulse_problems]) or "(no pulse tasks)",
+    "/pulse": list_pulse_tasks,
     "/reminders": lambda: "\n".join(
         f"{r['due']}: {r['message']}"
         for r in load_json(REMINDERS_FILE, []))
@@ -1833,67 +1912,112 @@ COMMANDS = {
 
 
 def approve_pending(name: str) -> str:
-    """HUMAN-GATED WRITE: this is the only code path that adds to
-    pulse.md, and it only runs from a user-typed /approve command."""
+    """Only a human command can activate a task, including expiry consent."""
     name = name.strip().lower()
-    pending = load_json(PENDING_PULSE_FILE, {})
-    if not name:
-        # Bare "/approve" — fine to resolve on your own when there is
-        # exactly one candidate; still a real keystroke either way, so
-        # this doesn't loosen who can approve, only how much you type.
-        if not pending:
-            return "No pending tasks to approve."
-        if len(pending) > 1:
-            return (f"More than one task is pending — say which: "
-                    f"/approve <name>. Pending: {', '.join(pending)}")
-        name = next(iter(pending))
-    if name not in pending:
-        return (f"No pending task named '{name}'. Pending: "
-                f"{', '.join(pending) or 'none'}")
-    task = pending.pop(name)
-    with open(PULSE_FILE, "a", encoding="utf-8") as f:
-        f.write(f"\n## {name}\nschedule: {task['cron']}\n\n"
-                f"{task['prompt']}\n")
-    save_json(PENDING_PULSE_FILE, pending)
-    log_event("pulse_approved", name=name, cron=task["cron"])
-    kind = schedule_kind(task["cron"])[0]
-    note = {"reboot": " (first fires at the next restart)",
-            "every": " (interval runs from now)",
-            "idle": " (fires once after that long with no contact, "
-                    "then not again until you speak to me)"}.get(kind, "")
-    return f"Approved — '{name}' ({task['cron']}) is now active{note}."
+    with pulse_format.LOCK:
+        pending = _load_pulse_pending()
+        if not name:
+            if not pending:
+                return 'No pending tasks to approve.'
+            if len(pending) > 1:
+                return f"Specify /approve <name>. Pending: {', '.join(pending)}"
+            name = next(iter(pending))
+        if name not in pending:
+            return f"No pending task named '{name}'. Pending: {', '.join(pending) or 'none'}"
+        candidate = pending[name]
+        if not isinstance(candidate, dict):
+            return f"Invalid proposal '{name}'; use /reject {name}."
+        try:
+            task = _validated_pulse_proposal(name, candidate.get('cron'), candidate.get('prompt'), candidate.get('expires'))
+        except (ValueError, TypeError, AttributeError, OverflowError) as e:
+            return f"Not approved: {e}. Use /reject {name} or propose a corrected task."
+        content = pulse_format.read_text(PULSE_FILE)
+        if any(n.casefold() == name.casefold() for n, _, _ in pulse_format.sections(content)):
+            return f"Not approved: a task named '{name}' already exists. Remove it first."
+        expiry_line = f"expires: {task['expires']}\n" if task['expires'] else ''
+        new_content = content + ('' if not content or content.endswith('\n') else '\n')
+        new_content += f"\n## {name}\nschedule: {task['cron']}\n{expiry_line}\n{task['prompt']}\n"
+        if pulse_format.read_text(PULSE_FILE) != content:
+            return 'pulse.md changed during approval; retry.'
+        pulse_format.atomic_write(PULSE_FILE, new_content)
+        state = _load_pulse_state()
+        pulse_format.forget_state(state, [name])
+        # Start intervals/cron from approval, not the next scheduler poll.
+        # Idle/reboot tasks have not fired yet; an artificial last-run stamp
+        # would suppress the first idle period or the next startup.
+        if schedule_kind(task['cron'])[0] in ('cron', 'every'):
+            state[name] = datetime.now().isoformat()
+        pulse_format.save_json(PULSE_STATE_FILE, state)
+        pending.pop(name)
+        pulse_format.save_json(PENDING_PULSE_FILE, pending)
+    log_event('pulse_approved', name=name, cron=task['cron'], expires=task['expires'])
+    kind = schedule_kind(task['cron'])[0]
+    note = {'reboot': ' (first fires at the next restart)',
+            'every': ' (interval runs from now)',
+            'idle': ' (once per idle period, not repeatedly during the same silence)',
+            'once': ' (automatically removed after a successful run)'}.get(kind, '')
+    expiry_note = f" Expires: {task['expires']}." if task['expires'] else ''
+    return f"Approved — '{name}' ({task['cron']}) is now active{note}.{expiry_note}"
 
 
 def reject_pending(name: str) -> str:
     name = name.strip().lower()
-    pending = load_json(PENDING_PULSE_FILE, {})
-    if name not in pending:
-        return f"No pending task named '{name}'."
-    pending.pop(name)
-    save_json(PENDING_PULSE_FILE, pending)
-    log_event("pulse_rejected", name=name)
+    with pulse_format.LOCK:
+        pending = _load_pulse_pending()
+        if not name and len(pending) == 1:
+            name = next(iter(pending))
+        if name not in pending:
+            return f"Specify /reject <name>. Pending: {', '.join(pending) or 'none'}"
+        pending.pop(name)
+        pulse_format.save_json(PENDING_PULSE_FILE, pending)
+    log_event('pulse_rejected', name=name)
     return f"Rejected and discarded '{name}'."
 
 
 def remove_pulse_task(name: str) -> str:
-    """Human-only removal of an active task, by name."""
-    name = name.strip().lower()
-    content = read_file(PULSE_FILE)
-    pattern = re.compile(rf"^#{{2,}}[ \t]*{re.escape(name)}[ \t]*\n"
-                         rf"\s*schedule:[^\n]*(?:\n|\Z)"
-                         rf".*?(?=^#{{2,}}[ \t]*\S|\Z)",
-                         re.MULTILINE | re.DOTALL | re.IGNORECASE)
-    new_content, n = pattern.subn("", content)
-    if not n:
-        names = ", ".join(t["name"] for t in parse_pulse()) or "none"
-        return f"No active task named '{name}'. Active: {names}"
-    with open(PULSE_FILE, "w", encoding="utf-8") as f:
-        f.write(new_content.strip() + "\n")
-    state = load_json(PULSE_STATE_FILE, {})
-    if state.pop(name, None) is not None:
-        save_json(PULSE_STATE_FILE, state)
-    log_event("pulse_removed", name=name)
-    return f"Removed pulse task '{name}'."
+    """Human-only exact-name removal of active/pending tasks and their state."""
+    name = name.strip()
+    if not name:
+        return 'Use /pulse remove <exact-name> (or /pulse_remove <exact-name>).\n' + list_pulse_tasks()
+    with pulse_format.LOCK:
+        content = pulse_format.read_text(PULSE_FILE)
+        try:
+            new_content, removed = pulse_format.remove_sections(content, [name])
+        except ValueError as e:
+            return f"Not removed: {e}."
+        pending = _load_pulse_pending()
+        pending_names = [n for n in pending if n.casefold() == name.casefold()]
+        if len(pending_names) > 1:
+            return 'Not removed: duplicate pending task names; resolve them manually.'
+        if not removed and not pending_names:
+            return f"No task named '{name}'. Use /pulse list for exact names."
+        if removed:
+            if pulse_format.read_text(PULSE_FILE) != content:
+                return 'pulse.md changed during removal; retry.'
+            pulse_format.atomic_write(PULSE_FILE, new_content)
+        if pending_names:
+            for n in pending_names:
+                pending.pop(n)
+            pulse_format.save_json(PENDING_PULSE_FILE, pending)
+        state = _load_pulse_state()
+        pulse_format.forget_state(state, removed + pending_names)
+        pulse_format.save_json(PULSE_STATE_FILE, state)
+        running = name.casefold() in _pulse_running
+    log_event('pulse_removed', name=name, reason='human', pending=bool(pending_names))
+    note = ' It was already running; this cannot interrupt that turn, but prevents future runs.' if running else ''
+    return f"Removed pulse task '{name}' and its saved scheduling state.{note}"
+
+
+def pulse_command(arg: str) -> str:
+    verb, _, rest = arg.strip().partition(' ')
+    if not verb or (verb.lower() == 'list' and not rest.strip()):
+        return list_pulse_tasks()
+    if verb.lower() in ('remove', 'delete'):
+        return remove_pulse_task(rest)
+    if verb.lower() == 'cleanup' and not rest.strip():
+        removed = cleanup_expired_pulse()
+        return 'Removed expired/completed tasks: ' + ', '.join(removed) if removed else 'No expired/completed pulse tasks to remove.'
+    return 'Use /pulse list, /pulse remove <exact-name>, or /pulse cleanup.'
 
 
 SIDEBARS_FILE = "sidebars.md"
@@ -2172,6 +2296,7 @@ PREFIX_COMMANDS = {
     "/approve": approve_pending,
     "/reject": reject_pending,
     "/pulse_remove": remove_pulse_task,
+    "/pulse": pulse_command,
     "/cancel_project": cancel_project,
 }
 
@@ -2303,6 +2428,9 @@ def handle_command(text: str, chat_id: int = 0):
     which is exactly what makes /approve a human-in-the-loop gate.
     Returns reply text, or None if the message is not a command."""
     text = text.strip()
+    if text.startswith('/'):
+        global last_contact_at
+        last_contact_at = datetime.now()  # human commands count as contact too
     # /train is an alias people reach for; it does NOT train anything.
     if text in ("/trace", "/train", "/debug"):
         return toggle_trace(chat_id)
