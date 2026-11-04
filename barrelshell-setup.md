@@ -31,7 +31,7 @@ cd ~/barrelshell
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install ollama ddgs requests croniter tzdata
+pip install -r requirements.txt
 
 readlink -f .venv/bin/python   # note this absolute path for systemd
 ```
@@ -49,11 +49,17 @@ py -3 -m venv .venv
 #   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 
 python -m pip install --upgrade pip
-pip install ollama ddgs requests croniter tzdata
+pip install -r requirements.txt
 ```
 
 The venv's interpreter is `C:\barrelshell\.venv\Scripts\python.exe` —
 services run it directly, no activation needed.
+
+PDF reading is included. For optional JavaScript-page rendering, install
+`requirements-browser.txt`, run `python -m playwright install chromium`,
+and set `fetch_browser_enabled` to `true`. See [FETCHING.md](FETCHING.md)
+for upgrade and test instructions. Install Chromium as the same OS user
+that runs the bot service.
 
 > No git? Download the ZIP from
 > https://github.com/jkries/barrelshell and extract it to that folder

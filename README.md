@@ -16,8 +16,9 @@ the settings and skills around it.
 **A Barrel** is a running instance — yours, defined entirely by text
 files you can read and edit.
 
-No cloud. No API keys. No subscription. Nothing leaves your machine
-except the web searches you ask for.
+Local model inference. No model API keys or subscription. Web searches,
+fetches, downloads, and optional browser rendering contact remote sites;
+Telegram, if enabled, also carries your chat messages.
 
 ---
 
@@ -36,7 +37,8 @@ That makes it a working personal assistant *and* a teaching tool.
   not use Telegram at all
 - **Remember** durable facts about you across restarts, and forget them
   when you say so
-- **Search the web**, read full pages, check the weather, do exact math,
+- **Search the web**, read webpages and text-based PDFs, optionally render
+  JavaScript pages, check the weather, do exact math,
   handle timezones, and set one-off reminders
 - **Act on its own** on a schedule — morning briefings, weekly reviews,
   a nudge at 3pm — including a task that fires on startup
@@ -116,7 +118,7 @@ git clone https://github.com/jkries/barrelshell.git
 cd barrelshell
 
 python3 -m venv .venv && source .venv/bin/activate
-pip install ollama ddgs requests croniter tzdata
+pip install -r requirements.txt
 
 ollama pull qwen3:8b
 
@@ -151,7 +153,7 @@ py -3 -m venv .venv
 .venv\Scripts\Activate.ps1
 # if activation is blocked:
 #   Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-pip install ollama ddgs requests croniter tzdata
+pip install -r requirements.txt
 
 ollama pull qwen3:8b
 
@@ -185,6 +187,32 @@ the dashboard.
 Full instructions — including Windows, running as a service with crash
 recovery, remote Ollama, and model choice by hardware — are in
 **[the setup guide](barrelshell-setup.md)**.
+
+## PDF and JavaScript-page reading
+
+Text-based PDF support and main-content HTML extraction are included in
+`requirements.txt`. Documents are cached locally with numbered chunks,
+PDF page numbers, and explicit partial-read warnings. The agent can read
+more chunks or search within a document instead of losing everything
+past the first 4,000 characters. Workspace PDFs use the same reader.
+
+Browser rendering is optional and off by default:
+
+```bash
+python -m pip install -r requirements-browser.txt
+python -m playwright install chromium
+```
+
+Set `"fetch_browser_enabled": true` in your existing `config.json` and
+restart the bot. Static HTML is tried first; sparse pages trigger browser
+fallback. The agent can also explicitly request rendering when a page
+has lots of navigation but its real content needs JavaScript.
+
+For upgrade instructions, direct tests without Ollama, configuration,
+limits and security details, see **[FETCHING.md](FETCHING.md)**.
+
+Scanned/image-only PDFs still need OCR, which is not included. Browser
+rendering does not bypass logins, paywalls, CAPTCHAs or anti-bot controls.
 
 ## Hardware
 

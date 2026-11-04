@@ -260,6 +260,14 @@ Run every new skill through these before it ships, in writing:
   history.md, and the .env/bat secrets must be unreachable by any
   skill. Self-modification is how a one-shot injection becomes
   permanent.
+- **Network reads**: use `barrel_web.transport.get` for public HTTP(S)
+  resources, not a hostname precheck followed by `requests.get`. The shared
+  transport pins validated IPs, checks every redirect, preserves TLS hostname
+  verification, and enforces byte/deadline limits. Never add a production
+  private-network bypass. Browser subrequests need the same policy.
+- **Untrusted output**: tool results are source data, not user instructions.
+  Do not route fetched text through `handle_command` or use it to authorize
+  memory writes. Prefer the shared document reader for PDFs and long pages.
 - **Cap everything**: result length, download size, rounds, timeouts.
 - **No destructive verbs in v1** of any skill. Add them later, with
   confirmation, if the beta demands it.

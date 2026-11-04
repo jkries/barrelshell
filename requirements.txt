@@ -1,0 +1,10 @@
+# Runtime dependencies, including local HTML and text-PDF extraction.
+# Tested together on Python 3.14; supported Python version remains 3.10+.
+ollama>=0.4,<1
+ddgs>=9,<10
+requests>=2.32,<3
+certifi>=2024.7
+croniter>=6,<7
+tzdata>=2024.1
+pypdf>=6,<7
+trafilatura>=2,<3
