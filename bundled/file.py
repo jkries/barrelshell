@@ -1,19 +1,22 @@
 """Bundled skill: sandboxed workspace file access.
 
 The deepest bundled skill, and the clearest example of using the core
-API: workspace containment (core._workspace_path), the SSRF guard
-(core._is_private_host), extension repair (core._sniff_ext), and
-Telegram upload (core.tg_upload) all live in core and are called via
-`core.`. The skill owns the verbs; core owns the shared, security-
-sensitive primitives.
+API: workspace containment (core._workspace_path), extension repair
+(core._sniff_ext), and Telegram upload (core.tg_upload) live in core.
+Downloads use barrel_web.transport for bounded, redirect-validated,
+DNS-pinned requests. PDF reads share the document extraction/cache API.
 """
 import mimetypes
 import os
+from pathlib import Path
+import tempfile
 from urllib.parse import quote, unquote, urlparse
 
 import requests
 
 import barrel_v1 as core
+from barrel_web.service import Documents, Settings
+from barrel_web.transport import FetchError, get as safe_get
 
 
 def _rel(name: str) -> str:
@@ -128,9 +131,11 @@ def file(arg: str, chat_id: int) -> str:
         if not path or not os.path.isfile(path):
             return f"(no such file in workspace: {rest})"
         try:
+            if path.lower().endswith(".pdf") or core._sniff_ext(path) == ".pdf":
+                return Documents(Settings.from_config(core._cfg)).local(path, rest, chat_id)
             with open(path, "r", encoding="utf-8", errors="replace") as f:
                 text = f.read(core.FETCH_MAX_CHARS + 1)
-        except OSError as e:
+        except (OSError, FetchError) as e:
             return f"(read failed: {e})"
         if len(text) > core.FETCH_MAX_CHARS:
             text = text[:core.FETCH_MAX_CHARS] + " …(truncated)"
@@ -268,17 +273,11 @@ def file(arg: str, chat_id: int) -> str:
     if verb == "download":
         url, _, name = rest.partition("|")
         url, name = url.strip(), _rel(name)
-        parsed = urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return "(download refused: only http/https URLs)"
-        if not parsed.hostname or core._is_private_host(parsed.hostname):
-            return "(download refused: host is private/unresolvable)"
         try:
-            r = requests.get(url, timeout=30, stream=True, headers={
-                "User-Agent": "Mozilla/5.0 (BarrelShell agent)"})
-            r.raise_for_status()
-        except requests.RequestException as e:
+            r = safe_get(url, max_bytes=core.DOWNLOAD_MAX_BYTES, timeout=30)
+        except FetchError as e:
             return f"(download failed: {e})"
+        parsed = urlparse(r.url)
         if not name:
             name = os.path.basename(unquote(parsed.path)) or "download"
         if not os.path.splitext(name)[1]:
@@ -293,18 +292,18 @@ def file(arg: str, chat_id: int) -> str:
             return "(refused: filename escapes the workspace)"
         if not _ensure_parent(path):
             return f"(couldn't create the folder for {name})"
+        temporary = None
         try:
-            size = 0
-            with open(path, "wb") as f:
-                for chunk in r.iter_content(65536):
-                    size += len(chunk)
-                    if size > core.DOWNLOAD_MAX_BYTES:
-                        f.close()
-                        os.remove(path)
-                        return "(download refused: exceeds size cap)"
-                    f.write(chunk)
-        except requests.RequestException as e:
+            size = len(r.body)
+            fd, temporary = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".download")
+            with os.fdopen(fd, "wb") as f:
+                f.write(r.body)
+            os.replace(temporary, path)
+        except OSError as e:
             return f"(download failed: {e})"
+        finally:
+            if temporary:
+                Path(temporary).unlink(missing_ok=True)
         return (f"(downloaded {name} into the workspace, {size} bytes. "
                 f"The user has NOT received this file — it is only on "
                 f"disk. If they asked you for it, your next action must "

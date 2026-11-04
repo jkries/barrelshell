@@ -23,7 +23,10 @@ import barrel_v1 as core
 # Packages the platform needs, with what breaks when each is missing.
 REQUIRED = [
     ("ollama", "talking to the model at all"),
-    ("requests", "web search, fetch, weather, downloads"),
+    ("requests", "Telegram and weather HTTP requests"),
+    ("certifi", "verified HTTPS document downloads"),
+    ("pypdf", "text-based PDF reading"),
+    ("trafilatura", "main-content HTML extraction"),
     ("ddgs", "the search and images skills"),
     ("croniter", "scheduled pulse tasks"),
 ]
@@ -40,6 +43,11 @@ def _check_packages() -> list:
         lines.append(f"  [{_tick(found)}] {name}"
                      + ("" if found else f"  <- MISSING; needed for "
                                          f"{why}. Fix: pip install {name}"))
+    if core._cfg.get("fetch_browser_enabled"):
+        found = importlib.util.find_spec("playwright") is not None
+        lines.append(f"  [{_tick(found)}] playwright (browser rendering enabled)"
+                     + ("; Chromium must also be installed for this OS user" if found else
+                        " <- pip install -r requirements-browser.txt; python -m playwright install chromium"))
     # tzdata isn't imported directly — zoneinfo needs it on Windows,
     # so test the capability rather than the package.
     try:
