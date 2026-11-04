@@ -112,7 +112,54 @@ behavior.
 
 Requires Python 3.10+ and [Ollama](https://ollama.com).
 
-### Linux / macOS
+### Recommended: guided setup
+
+Install Ollama, then clone this repo and install the Python dependencies:
+
+**Linux / macOS**
+
+```bash
+git clone https://github.com/jkries/barrelshell.git
+cd barrelshell
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+python barrel_v1.py
+```
+
+**Windows (PowerShell)**
+
+```powershell
+git clone https://github.com/jkries/barrelshell.git
+cd barrelshell
+py -3 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe barrel_v1.py
+```
+
+Open **http://127.0.0.1:8787/setup**, or choose **Create your Barrel**
+on the dashboard. The wizard walks through naming, personality, an actual
+Ollama generation test, an isolated test chat, and optional Telegram pairing.
+No config copying, launcher editing, or numeric-ID lookup is necessary.
+If no model is installed, the wizard shows a pull command; it never starts
+a large download automatically.
+
+Local chat works without Telegram. Telegram linking uses an expiring private
+pairing link and asks you to confirm the account in the dashboard before it
+is authorized. Restart BarrelShell after pairing to activate Telegram.
+
+Progress is saved with **Save & finish later**. Reopen **Setup / Settings**
+any time. Existing identities require explicit replacement confirmation and
+receive a local backup; unrelated config keys are preserved.
+
+Wizard credentials are stored unencrypted in **`secrets.local.json`**, not
+`config.json`; keep that file private. On POSIX it is owner-readable/writable;
+on Windows, protect the project folder with your account's filesystem ACLs.
+`OLLAMA_HOST`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_ALLOWED_IDS` in the environment
+override saved settings. For a fresh wizard setup, do not set Telegram variables
+in your launcher (even empty ones). See [ONBOARDING.md](ONBOARDING.md) for a
+fresh-install test checklist and troubleshooting.
+
+### Manual setup alternative: Linux / macOS
 
 ```bash
 git clone https://github.com/jkries/barrelshell.git
@@ -144,7 +191,7 @@ set -a; source .env; set +a
 python barrel_v1.py
 ```
 
-### Windows (PowerShell)
+### Manual setup alternative: Windows (PowerShell)
 
 ```powershell
 git clone https://github.com/jkries/barrelshell.git
@@ -182,8 +229,9 @@ Then double-click `run_barrel.bat`, or run it from the terminal.
 
 ---
 
-Either way: message your bot, and open **http://127.0.0.1:8787** for
-the dashboard.
+After manual Telegram setup, message your bot and open
+**http://127.0.0.1:8787** for the dashboard. Telegram is optional; omit its
+credentials to use only the dashboard.
 
 Full instructions — including Windows, running as a service with crash
 recovery, remote Ollama, and model choice by hardware — are in

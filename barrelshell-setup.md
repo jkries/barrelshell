@@ -18,6 +18,27 @@ machine. To use an Ollama instance on another device, uncomment the
 
 ---
 
+## Recommended first run: dashboard setup wizard
+
+After installing dependencies (step 1) and Ollama, run `python barrel_v1.py`
+from the project directory with **no Telegram environment variables set**.
+Open **http://127.0.0.1:8787/setup**. The wizard creates your identity,
+tests Ollama with a real generation, lets you preview the personality without
+saving memories, and optionally links Telegram using a one-time pairing link.
+You do not need to copy the example files or look up your Telegram numeric ID.
+
+Telegram credentials are saved in `secrets.local.json` and become active after
+a process restart. This file is unencrypted: protect the project directory and
+never commit it. Environment variables take precedence over wizard settings;
+keep using them for an existing deployment, or remove them before pairing in
+the wizard. A configured Ollama address is saved as `ollama_host` in
+`config.json`, with `OLLAMA_HOST` still taking precedence.
+
+Existing setups are preserved unless you explicitly save replacements. Use
+**Setup / Settings** to reopen the wizard, or **Save & finish later** to resume.
+The detailed manual/service-deployment steps below remain supported.
+See [ONBOARDING.md](ONBOARDING.md) for acceptance tests and recovery steps.
+
 ## 1. Get the files and set up a virtual environment
 
 **Linux:**

@@ -51,6 +51,7 @@ from croniter import croniter
 from ddgs import DDGS
 
 import pulse_tasks as pulse_format
+import onboarding
 
 # Bundled skills import barrel_v1. When launched as a script, give them the
 # running module instead of accidentally creating a second core/config/state.
@@ -77,6 +78,7 @@ WEB_CHAT_FILE = "web_chat.json"
 # Tunables — defaults here, user overrides in config.json.
 DEFAULTS = {
     "model": "qwen3:8b",
+    "ollama_host": "http://127.0.0.1:11434",
     "num_ctx": 16384,
     "max_tool_rounds": 3,
     "progress_update_rounds": 3,
@@ -140,9 +142,10 @@ DASHBOARD_TOKEN = str(_cfg["dashboard_token"]).strip()
 # Telegram is OPTIONAL. With no token or no allowed IDs, the Barrel
 # runs local-only: the dashboard becomes the sole interface, and
 # scheduled tasks and reminders are delivered to its web chat.
-BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+_local_secrets = onboarding.load_secrets()
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", _local_secrets.get("telegram_bot_token", "")).strip()
 ALLOWED_IDS = {int(x) for x in
-               os.environ.get("TELEGRAM_ALLOWED_IDS", "").split(",")
+               os.environ.get("TELEGRAM_ALLOWED_IDS", _local_secrets.get("telegram_allowed_ids", "")).split(",")
                if x.strip().lstrip("-").isdigit()}
 TELEGRAM_ENABLED = bool(BOT_TOKEN and ALLOWED_IDS)
 WEB_CHAT_ID = 0   # web-chat conversation id (Telegram ids are nonzero)
@@ -156,8 +159,14 @@ tg_offset: int = 0   # module-level so /restart can ack it before exec
 # Dashboard binds to localhost by default (config: dashboard_host) —
 # it displays private conversation content and has no login. Binding
 # anywhere else REQUIRES config "dashboard_token"; see dashboard_loop.
-OLLAMA_URL = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+OLLAMA_URL = os.environ.get("OLLAMA_HOST", str(_cfg["ollama_host"])).rstrip("/")
 START_TIME = datetime.now()
+setup_service = onboarding.Setup(sys.modules[__name__])
+
+
+def model_chat(**kwargs):
+    """Use the same explicitly configured backend for every inference path."""
+    return ollama.Client(host=OLLAMA_URL).chat(**kwargs)
 
 # ------------------------------------------------------------- turn log
 
@@ -168,7 +177,10 @@ def log_event(event: str, **data) -> None:
         entry = {"ts": datetime.now().isoformat(timespec="seconds"),
                  "event": event, **data}
         with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            encoded = json.dumps(entry, ensure_ascii=False)
+            if BOT_TOKEN:
+                encoded = encoded.replace(BOT_TOKEN, "[REDACTED_BOT_TOKEN]")
+            f.write(encoded + "\n")
     except OSError as e:
         print(f"log write failed: {e}")
 
@@ -834,7 +846,7 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
             messages = ([{"role": "system",
                           "content": build_system_prompt()}]
                         + convo[-MAX_TURNS:])
-            response = ollama.chat(model=MODEL, messages=messages,
+            response = model_chat(model=MODEL, messages=messages,
                                    options={"num_ctx": NUM_CTX,
                                            "num_predict": -1})
             raw = response["message"]["content"]
@@ -1337,6 +1349,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Cache-Control", "no-store")
         for k, v in (extra or {}).items():
@@ -1374,6 +1388,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                 f"Path=/; HttpOnly; SameSite=Strict; "
                                 f"Max-Age=31536000"}
                  if DASHBOARD_TOKEN and qs.get("token") else None)
+        if path == "/setup/status":
+            try:
+                result = setup_service.status()
+                self._send(json.dumps(result).encode(), "application/json", 200, extra)
+            except (ValueError, OSError):
+                self._send(b'{"error":"Setup state is unreadable. Check local JSON files."}', "application/json", 400)
+            return
+        if path in ("/setup", "/setup.js", "/setup.css"):
+            asset, ctype = {"/setup": ("onboarding.html", "text/html; charset=utf-8"),
+                            "/setup.js": ("onboarding.js", "application/javascript; charset=utf-8"),
+                            "/setup.css": ("onboarding.css", "text/css; charset=utf-8")}[path]
+            with open(os.path.join(os.path.dirname(__file__), asset), "rb") as stream:
+                self._send(stream.read(), ctype, 200, extra)
+            return
         if path == "/messages":
             try:
                 since = int(qs.get("since", ["0"])[0])
@@ -1414,6 +1442,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "Content-Security-Policy": "sandbox; default-src 'none'"})
         else:
             self._send(b"not found", "text/plain", 404)
+
+    def _setup_post(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if not 0 < length <= 32000:
+                self._send(b'{"error":"Setup request must be 1-32000 bytes"}', "application/json", 413)
+                return
+            self.connection.settimeout(10)
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict):
+                raise ValueError("Expected a JSON object.")
+            action = urlparse(self.path).path.removeprefix("/setup/")
+            result = setup_service.dispatch(action, data)
+            self._send(json.dumps(result).encode(), "application/json")
+        except (ValueError, TypeError) as exc:
+            # Service errors contain only curated messages, never HTTP exception URLs/tokens.
+            message = str(exc) if not isinstance(exc, json.JSONDecodeError) else "Invalid setup JSON."
+            self._send(json.dumps({"error": message}).encode(), "application/json", 400)
+        except OSError:
+            self._send(b'{"error":"Cannot save setup files. Check directory permissions and retry."}',
+                       "application/json", 500)
+        except Exception:
+            self._send(b'{"error":"Setup failed. Check settings and retry; credentials were not logged."}',
+                       "application/json", 500)
 
     def _chat_image(self):
         """Web-chat image upload: base64 JSON in, described by the
@@ -1511,6 +1563,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if not self._authed(parse_qs(urlparse(self.path).query)):
             self._reject_post(b'{"error": "unauthorized"}', 401)
+            return
+        if urlparse(self.path).path.startswith("/setup/"):
+            self._setup_post()
             return
         if self.path == "/chat-image":
             self._chat_image()
@@ -1816,7 +1871,7 @@ def deliver(chat_id: int, text: str, kind: str = "chat") -> None:
 def describe_image(image_bytes: bytes) -> str:
     """One call to the vision model; its description — not the image —
     enters the conversation. Token usage is tracked like any call."""
-    response = ollama.chat(model=VISION_MODEL, messages=[{
+    response = model_chat(model=VISION_MODEL, messages=[{
         "role": "user",
         "content": ("Describe this image in detail for someone who "
                     "cannot see it. Transcribe any visible text "
@@ -2112,7 +2167,7 @@ def sidebar_answer(chat_id: int, question: str) -> str:
                 + entry["convo"][-SIDEBAR_MAX:]
                 + [{"role": "user", "content": question}])
     try:
-        response = ollama.chat(model=model, messages=messages,
+        response = model_chat(model=model, messages=messages,
                                options={"num_ctx": NUM_CTX,
                                         "num_predict": -1})
     except Exception as e:
@@ -2312,6 +2367,7 @@ PREFIX_COMMANDS_CHAT = {
 # one feeds — the same names assigned once at import, from _cfg.
 _RELOADABLE_CONFIG = [
     ("model", "MODEL", str),
+    ("ollama_host", "OLLAMA_URL", lambda v: os.environ.get("OLLAMA_HOST", str(v)).rstrip("/")),
     ("num_ctx", "NUM_CTX", int),
     ("max_tool_rounds", "MAX_TOOL_ROUNDS", int),
     ("progress_update_rounds", "PROGRESS_UPDATE_ROUNDS", int),
@@ -2470,6 +2526,8 @@ def main() -> None:
 
     threading.Thread(target=pulse_loop, daemon=True).start()
     threading.Thread(target=dashboard_loop, daemon=True).start()
+    if dashboard_available():
+        print("BarrelShell: choose Setup / Settings in the dashboard to create or configure your Barrel.")
 
     if not TELEGRAM_ENABLED:
         print("BarrelShell — local-only mode: no Telegram credentials, "
@@ -2487,7 +2545,7 @@ def main() -> None:
         try:
             updates = tg("getUpdates", offset=tg_offset, timeout=60)
         except requests.RequestException as e:
-            print(f"poll error, retrying: {e}")
+            print(f"Telegram poll error ({e.__class__.__name__}), retrying. Check token, network, webhook, and other running instances.")
             time.sleep(5)
             continue
 
@@ -2544,7 +2602,7 @@ def main() -> None:
             except Exception as e:
                 stats["errors"] += 1
                 log_event("turn_error", chat_id=chat_id, error=repr(e))
-                print(f"turn error: {e!r}")
+                print(f"turn error: {repr(e).replace(BOT_TOKEN, '[REDACTED_BOT_TOKEN]') if BOT_TOKEN else repr(e)}")
                 try:
                     send_message(chat_id, "⚠️ That one broke something "
                                  "on my end — details are in the log.")

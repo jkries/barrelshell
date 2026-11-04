@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Create your Barrel · BarrelShell</title>
+<link rel="stylesheet" href="/setup.css"><script src="/setup.js" defer></script>
+</head>
+<body>
+<header><a href="/">BARRELSHELL</a><span>Make it yours</span><button id="later" class="secondary">Save & finish later</button></header>
+<main>
+<nav id="steps" aria-label="Setup progress"></nav>
+<div id="error" role="alert" hidden></div>
+<div id="busy" role="status" hidden>Working… please wait. A cold model can take up to two minutes.</div>
+<section data-step="0">
+<h1>Let’s create your Barrel.</h1>
+<p>Your assistant runs on your hardware. Give it a name, choose how it behaves, and make sure you can talk to it.</p>
+<p>We’ll get local chat working first. Telegram is optional and can be linked later. No model API key is needed.</p>
+<div id="existing" class="notice" hidden><strong>We found an existing setup.</strong><p>Your identity and settings are loaded below. Keep them as they are, or explicitly confirm any replacement. Other configuration keys will be preserved.</p></div>
+<p class="muted">Personality and settings remain ordinary local files you can edit. Network activity occurs only when you check Ollama or link Telegram.</p>
+</section>
+<section data-step="1" hidden>
+<h1>What should we call your Barrel?</h1>
+<label>Barrel name<input id="name" maxlength="80" value="Cooper" autocomplete="off"></label>
+<label>What should it call you? <small>Optional</small><input id="owner" maxlength="80" autocomplete="off"></label>
+<label>Main purpose<select id="purpose"><option>General assistance</option><option>Personal organization</option><option>Research</option><option>Coding</option><option>Conversation</option></select></label>
+<p class="muted">This is its personality name, not a Telegram username.</p>
+</section>
+<section data-step="2" hidden>
+<h1>Give it a personality.</h1>
+<label>Starting point<select id="preset"><option value="practical">Practical companion — direct and useful</option><option value="organizer">Calm organizer — patient and structured</option><option value="collaborator">Curious collaborator — thoughtful and exploratory</option><option value="blank">Blank slate — your own style</option></select></label>
+<div class="columns"><label>Tone<select id="tone"><option>casual</option><option>professional</option><option>warm</option></select></label><label>Answer length<select id="length"><option>balanced</option><option>concise</option><option>detailed</option></select></label><label>Humor<select id="humor"><option>occasional</option><option>none</option><option>playful</option></select></label></div>
+<label>Anything else?<textarea id="extra" rows="3" maxlength="3000" placeholder="For example: avoid emojis; explain technical terms."></textarea></label>
+<button id="generate" class="secondary">Generate identity from these choices</button>
+<p id="custom-note" class="muted">The editable preview below becomes identity.md. Existing markdown is kept until you explicitly regenerate it.</p>
+<label>Identity preview / edit markdown<textarea id="identity" rows="13" maxlength="16000" spellcheck="false"></textarea></label>
+<label id="replace-wrap" class="check" hidden><input id="replace" type="checkbox">I want to replace my existing identity (a local backup will be kept).</label>
+</section>
+<section data-step="3" hidden>
+<h1>Connect its brain.</h1>
+<p>Start <a href="https://ollama.com" target="_blank" rel="noopener noreferrer">Ollama</a> on this machine, or enter the address of your own Ollama server. Only use a server you trust: your prompts will be sent there.</p>
+<label>Ollama address<input id="host" value="http://127.0.0.1:11434" maxlength="500" spellcheck="false"></label>
+<button id="check" class="secondary">Check connection & list models</button>
+<p id="connection" role="status"></p>
+<label>Model<input id="model" list="models" value="qwen3:8b" maxlength="200" spellcheck="false"><datalist id="models"></datalist></label>
+<p>If no model is installed, run <code>ollama pull qwen3:8b</code> on the Ollama machine, then check again. This is a large download; setup won’t start it automatically. Choose a smaller model if RAM is limited.</p>
+<details><summary>Advanced</summary><label>Context size<input id="num_ctx" type="number" min="2048" max="131072" step="1024" value="16384"></label><p class="muted">Larger contexts need more RAM. Lower this if generation runs out of memory.</p></details>
+<button id="test">Test model response</button><pre id="test-result" aria-live="polite"></pre>
+<p class="muted">Continue saves this tested backend and applies it to local chat immediately.</p>
+</section>
+<section data-step="4" hidden>
+<h1>Meet your Barrel.</h1><p>Try the personality before connecting Telegram. These isolated previews do not use tools, save memories, or enter your normal chat history.</p>
+<div class="columns"><button class="prompt secondary" data-prompt="Introduce yourself.">Introduce yourself</button><button class="prompt secondary" data-prompt="Help me plan tomorrow.">Plan tomorrow</button><button class="prompt secondary" data-prompt="Explain something complicated simply.">Explain something</button></div>
+<label>Try a message<textarea id="preview-message" rows="2" maxlength="4000">Introduce yourself.</textarea></label>
+<button id="preview-send">Send preview</button><pre id="preview-result" aria-live="polite"></pre>
+<p>Feels right? Continue. Otherwise, go back and adjust the personality.</p>
+</section>
+<section data-step="5" hidden>
+<h1>Take it to Telegram.</h1><p>Optional. Your Barrel already works through local chat.</p>
+<div id="tg-existing" class="notice" hidden>Telegram is already enabled. Keep your existing link and continue. To replace it, stop BarrelShell and remove the old launcher/environment or local credentials first.</div>
+<div id="tg-new">
+<ol><li>Open <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather</a> in Telegram.</li><li>Send <code>/newbot</code> and choose a display name.</li><li>Choose an available username ending in <code>bot</code>.</li><li>Paste the token below. It’s a password: never share it or commit it.</li></ol>
+<label>Bot token<input id="token" type="password" autocomplete="new-password" maxlength="250" spellcheck="false"></label>
+<button id="tg-start">Validate token & start pairing</button>
+<div id="pairing" hidden><p id="tg-bot"></p><a id="pair-link" class="button" target="_blank" rel="noopener noreferrer">Open my bot in Telegram</a><p>Press <strong>Start</strong> in Telegram, then return here. The link expires in five minutes. Only a matching private-chat pairing request can be confirmed; strangers cannot use your bot.</p></div>
+<pre id="tg-status" aria-live="polite"></pre>
+<button id="tg-confirm" hidden>Yes, that’s me — authorize this account</button>
+<button id="tg-cancel" class="secondary" hidden>Cancel pairing</button>
+</div>
+<p id="restart-note" class="notice" hidden>Credentials saved. Restart BarrelShell to enable Telegram chat. You can use the dashboard’s normal chat command <code>/restart</code>, or stop and start the process. Environment credentials override wizard settings.</p>
+<p>You can continue without Telegram, or finish linking it later from Setup / Settings.</p>
+</section>
+<section data-step="6" hidden>
+<h1>Your Barrel is ready.</h1><pre id="summary"></pre>
+<p>Start with a conversation. Skills, schedules, and vision can wait until you’re comfortable.</p>
+<p id="final-restart" class="notice" hidden>Telegram pairing is saved. Restart the process to activate it, then send your bot a message to test an AI reply end to end.</p>
+</section>
+<footer><button id="back" class="secondary">Back</button><button id="next">Let’s begin</button></footer>
+</main>
+</body></html>

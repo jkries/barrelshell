@@ -2,6 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BarrelShell</title>
 <style>
 :root { --bg:#14161a; --panel:#1c1f25; --line:#2a2e35; --fg:#d7dae0;
@@ -65,7 +66,12 @@ button:disabled { opacity:.45; cursor:default; }
   <h1>BARRELSHELL</h1>
   <span id="dot">&#9679;</span>
   <span id="uptime">connecting…</span>
+  <a href="/setup" style="margin-left:auto;color:var(--accent)">Setup / Settings</a>
 </header>
+<div id="setup-banner" hidden style="margin:1rem 1.5rem;padding:1rem;border:1px solid var(--accent);border-radius:.5rem">
+  <strong>Welcome to BarrelShell.</strong> Give your Barrel a name, test its brain, and optionally link Telegram.
+  <a href="/setup" style="color:var(--accent)">Create your Barrel →</a>
+</div>
 <main>
   <div id="cards">
     <section><h2>Agent</h2><table id="t-agent"></table></section>
@@ -352,6 +358,9 @@ $("attach-input").addEventListener("change",
 $("inp").addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });
+fetch("/setup/status").then(r => r.json()).then(s => {
+  $("setup-banner").hidden = !s.offer_setup;
+}).catch(() => {});
 refresh();
 setInterval(refresh, 5000);
 pollMessages();
