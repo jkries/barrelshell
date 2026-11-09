@@ -841,13 +841,16 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
         nudged_save = False
         turn_in = turn_out = 0
         retried_empty = False
+        # Snapshot once so a toggle during a turn affects the next turn,
+        # not an arbitrary tool round of the current one.
+        think_options = thinking_options(chat_id)
         final_reply = "(no reply)"
         for _round in range(MAX_TOOL_ROUNDS + 2):
             messages = ([{"role": "system",
                           "content": build_system_prompt()}]
                         + convo[-MAX_TURNS:])
             response = model_chat(model=MODEL, messages=messages,
-                                   options={"num_ctx": NUM_CTX,
+                                   **think_options, options={"num_ctx": NUM_CTX,
                                            "num_predict": -1})
             raw = response["message"]["content"]
             t_in = _count(response, "prompt_eval_count")
@@ -1300,6 +1303,7 @@ def gather_status() -> dict:
         "model": MODEL,
         "vision_model": VISION_MODEL or "disabled",
         "trace_chats": sorted(trace_chats),
+        "thinking_overrides": dict(thinking_overrides),
         "sidebar_chats": sorted(c for c, e in sidebar_state.items()
                                 if e.get("on")),
         "num_ctx": NUM_CTX,
@@ -1830,6 +1834,41 @@ def web_post(role: str, text: str, kind: str = "chat") -> int:
 
 # --------------------------------------------------------- trace mode
 
+# Session-only per-chat requests. Absence preserves Ollama's model default.
+# This controls generation, not whether private reasoning is displayed.
+thinking_overrides: dict[int, bool] = {}
+
+
+def thinking_options(chat_id: int) -> dict:
+    value = thinking_overrides.get(chat_id)
+    return {} if value is None else {"think": value}
+
+
+def set_thinking(arg: str, chat_id: int = 0) -> str:
+    """Human command only, shared by web/Telegram and their sidebar paths."""
+    arg = arg.strip().lower()
+    if arg not in ("", "on", "off", "status", "default"):
+        return "Usage: /think [on|off|status|default]. /think alone toggles (first toggle requests OFF)."
+    if arg == "status":
+        value = thinking_overrides.get(chat_id)
+        state = "MODEL DEFAULT (no override)" if value is None else ("ON" if value else "OFF")
+        return (f"Thinking request: {state} for this chat. "
+                "The model must support the requested mode. "
+                "Use /think on, /think off, or /think default.")
+    if arg == "default":
+        thinking_overrides.pop(chat_id, None)
+        state = "MODEL DEFAULT (no override)"
+    else:
+        enabled = not thinking_overrides.get(chat_id, True) if not arg else arg == "on"
+        thinking_overrides[chat_id] = enabled
+        state = "ON" if enabled else "OFF"
+    log_event("thinking_changed", chat_id=chat_id, requested=state)
+    return (f"Thinking requested {state} for this chat, starting with the next turn "
+            "(including /ask and /sidebar). Requires model support; some models "
+            "cannot switch thinking off. This does not display reasoning traces. "
+            "Resets on restart.")
+
+
 trace_chats: set = set()        # chat ids with /trace switched on
 web_trace_buffer: list = []     # web lines, flushed in order by /chat
 
@@ -2168,7 +2207,7 @@ def sidebar_answer(chat_id: int, question: str) -> str:
                 + [{"role": "user", "content": question}])
     try:
         response = model_chat(model=model, messages=messages,
-                               options={"num_ctx": NUM_CTX,
+                               **thinking_options(chat_id), options={"num_ctx": NUM_CTX,
                                         "num_predict": -1})
     except Exception as e:
         hint = _model_missing(entry.get("model", ""))
@@ -2360,6 +2399,7 @@ PREFIX_COMMANDS = {
 PREFIX_COMMANDS_CHAT = {
     "/ask": ask_clean,
     "/sidebar": toggle_sidebar,
+    "/think": set_thinking,
 }
 
 

@@ -67,6 +67,21 @@ hardware. No cloud, no telemetry — it's just the two of you.
 - Honest about uncertainty. If you don't know, say so — never bluff.
 ```
 
+## Toggle model thinking
+
+In Telegram or local dashboard chat:
+
+- `/think` — toggle thinking requests (first toggle requests OFF).
+- `/think on` / `/think off` — explicitly enable or disable thinking.
+- `/think status` — show this chat's preference.
+- `/think default` — restore Ollama's model default.
+
+The setting is per-chat and resets on restart. It applies from the next turn,
+including `/ask` and `/sidebar`; it controls generation, not displaying reasoning
+traces. Until you change it, the model's default behavior is preserved. Your
+model must support the requested mode—some models cannot disable thinking.
+Use a current Ollama server and install the updated `requirements.txt`.
+
 ## Skills are drop-in files
 
 Every `.py` file in `skills/` that defines a `SKILL` dict is merged

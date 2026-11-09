@@ -202,11 +202,17 @@ Two model-specific notes:
 - **Context costs memory.** `NUM_CTX` grows the KV cache, which
   competes with model weights for VRAM. If a model that fits suddenly
   crawls or spills to CPU after raising `NUM_CTX`, that's why.
-- **Thinking models.** `qwen3` (and other reasoning models) can emit
-  `<think>…</think>` blocks. Recent Ollama versions separate this out,
-  but if reasoning text shows up in Telegram replies, pass
-  `think=False` in `ollama.chat()` or strip `<think>` blocks the way
-  the script strips `<remember>`.
+- **Thinking models.** Use `/think` in Telegram or dashboard chat to toggle
+  Ollama thinking requests. The first toggle requests OFF; subsequent toggles
+  alternate ON/OFF. `/think on` and `/think off` set an explicit preference,
+  `/think status` reports it, and `/think default` restores the model default.
+  Until changed, no override is sent. This is per-chat, session-only, takes
+  effect next turn, and also applies to `/ask`, `/sidebar`, and scheduled turns
+  using that chat. It does not change setup previews or the separate vision
+  description model, and it does not display reasoning traces. Models must
+  support the requested mode; some always-think or level-based models cannot
+  disable reasoning via a boolean switch. Use current Ollama and run
+  `pip install -r requirements.txt` to ensure the Python client supports `think`.
 
 Switch models with `ollama pull <model>`, edit the `MODEL` constant,
 restart the service.
