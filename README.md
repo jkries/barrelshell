@@ -82,6 +82,27 @@ traces. Until you change it, the model's default behavior is preserved. Your
 model must support the requested mode—some models cannot disable thinking.
 Use a current Ollama server and install the updated `requirements.txt`.
 
+## Choose answer detail
+
+Use these commands in Telegram or local dashboard chat:
+
+| Command | Style |
+| --- | --- |
+| `/detail brief` | Compact, answer-first replies; offers to expand only when useful |
+| `/detail balanced` | Relevant explanation and practical next steps without tangents |
+| `/detail full` | Unrestricted depth appropriate to the question, not forced verbosity |
+| `/detail status` | Show this chat's preference (`/detail` alone also shows status) |
+| `/detail default` | Return to the personality's configured style |
+
+This is a per-chat, session-only preference that resets on restart. It applies
+from the next turn to normal replies, `/ask`, `/sidebar`, and scheduled turns
+using that chat. Explicit requests (such as complete code or a detailed walkthrough)
+override the length preference for that answer. Essential warnings and required
+steps should never be omitted to save space. There are no hard word/token limits,
+and `/think` is unchanged. As a prompt-based style preference, exact length
+still depends on the model. No override is applied until you choose a mode;
+setup previews and the separate vision description model are unchanged.
+
 ## Skills are drop-in files
 
 Every `.py` file in `skills/` that defines a `SKILL` dict is merged

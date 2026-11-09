@@ -513,6 +513,22 @@ Telegram doesn't change the dashboard), it switches itself off after
 4 hours of silence, and scheduled pulse tasks always keep their full
 memory and tools regardless.
 
+**Answer length.** `/detail brief`, `/detail balanced`, and `/detail full`
+set a response-style preference for this chat. Brief answers lead with the
+answer and offer more detail only when useful; balanced answers include
+relevant explanation; full removes general brevity constraints without forcing
+verbosity. `/detail status` (or `/detail` alone) shows the preference;
+`/detail default` removes it and restores the personality's usual style.
+
+The preference is session-only, resets on restart, and applies from the next
+turn to normal chat, `/ask`, `/sidebar`, and scheduled turns for that chat.
+It is separate from `/think`, changes no files, and adds no token cutoff.
+Explicit user requests for an answer's detail take precedence, and essential
+warnings, commands, code, and required steps should not be dropped to save
+space. The model still determines exact length. Setup previews and the vision
+description model are unaffected; the normal answer about an image follows
+the chat's preference.
+
 **Named sub-agents.** Define them in `sidebars.md` next to
 barrel_v1.py — a `##` heading with a one-word name, an optional
 `model:` line, then the system prompt — and call one with `/sidebar

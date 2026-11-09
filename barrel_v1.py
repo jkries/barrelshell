@@ -844,10 +844,11 @@ def handle_turn(chat_id: int, user_text: str, kind: str = "chat",
         # Snapshot once so a toggle during a turn affects the next turn,
         # not an arbitrary tool round of the current one.
         think_options = thinking_options(chat_id)
+        detail_prompt = detail_instruction(chat_id)
         final_reply = "(no reply)"
         for _round in range(MAX_TOOL_ROUNDS + 2):
             messages = ([{"role": "system",
-                          "content": build_system_prompt()}]
+                          "content": build_system_prompt() + detail_prompt}]
                         + convo[-MAX_TURNS:])
             response = model_chat(model=MODEL, messages=messages,
                                    **think_options, options={"num_ctx": NUM_CTX,
@@ -1304,6 +1305,7 @@ def gather_status() -> dict:
         "vision_model": VISION_MODEL or "disabled",
         "trace_chats": sorted(trace_chats),
         "thinking_overrides": dict(thinking_overrides),
+        "detail_overrides": dict(detail_overrides),
         "sidebar_chats": sorted(c for c, e in sidebar_state.items()
                                 if e.get("on")),
         "num_ctx": NUM_CTX,
@@ -1834,6 +1836,59 @@ def web_post(role: str, text: str, kind: str = "chat") -> int:
 
 # --------------------------------------------------------- trace mode
 
+# Response-length preferences are separate from thinking and persona files.
+# Absence adds no instruction, preserving the existing personality's style.
+detail_overrides: dict[int, str] = {}
+_DETAIL_STYLES = {
+    "brief": ("Answer first and keep the response compact. Include only the explanation "
+              "needed to make it useful. Offer a question or suggestion for more detail "
+              "only when there is a useful next layer; do not routinely end every reply "
+              "with an offer to expand."),
+    "balanced": ("Give a direct answer with enough relevant explanation and practical "
+                 "next steps to be useful. Avoid unnecessary tangents; use neither "
+                 "extreme brevity nor exhaustive detail by default."),
+    "full": ("Use a full, unrestricted response: override general brevity preferences "
+             "and provide the depth the question warrants. Do not add a length limit, "
+             "but do not pad simple answers or force verbosity."),
+}
+
+
+def detail_instruction(chat_id: int) -> str:
+    mode = detail_overrides.get(chat_id)
+    if mode is None:
+        return ""
+    return (f"\n\n## Response detail preference: {mode}\n{_DETAIL_STYLES[mode]}\n"
+            "This overrides general response-length preferences only, not your role, "
+            "tool protocol, permission gates, or safety boundaries. The user's explicit "
+            "request for this answer takes precedence over this length preference "
+            "(for example, provide complete code when requested even in brief mode). "
+            "Never omit essential warnings, commands, required steps, or necessary "
+            "information just to be brief. There is no fixed word or paragraph limit.")
+
+
+def set_detail(arg: str, chat_id: int = 0) -> str:
+    """Deterministic user command; no model, disk writes, or persona changes."""
+    arg = arg.strip().lower()
+    if arg in ("", "status"):
+        mode = detail_overrides.get(chat_id)
+        state = mode.upper() if mode else "DEFAULT (personality's configured style)"
+        return (f"Response detail: {state} for this chat. "
+                "Use /detail brief, /detail balanced, /detail full, or /detail default. "
+                "Resets on restart.")
+    if arg == "default":
+        detail_overrides.pop(chat_id, None)
+        state = "DEFAULT (personality's configured style)"
+    elif arg in _DETAIL_STYLES:
+        detail_overrides[chat_id] = arg
+        state = arg.upper()
+    else:
+        return "Usage: /detail brief|balanced|full|status|default."
+    log_event("detail_changed", chat_id=chat_id, requested=state)
+    return (f"Response detail set to {state} for this chat, starting with the next turn "
+            "(including /ask and /sidebar). Explicit requests for more or less detail "
+            "still take precedence. Thinking is unchanged. Resets on restart.")
+
+
 # Session-only per-chat requests. Absence preserves Ollama's model default.
 # This controls generation, not whether private reasoning is displayed.
 thinking_overrides: dict[int, bool] = {}
@@ -2202,6 +2257,7 @@ def sidebar_answer(chat_id: int, question: str) -> str:
               f"other conversation and no tools available — answer "
               f"from your own knowledge, and say so if you don't "
               f"know.")
+    system += detail_instruction(chat_id)
     messages = ([{"role": "system", "content": system}]
                 + entry["convo"][-SIDEBAR_MAX:]
                 + [{"role": "user", "content": question}])
@@ -2400,6 +2456,7 @@ PREFIX_COMMANDS_CHAT = {
     "/ask": ask_clean,
     "/sidebar": toggle_sidebar,
     "/think": set_thinking,
+    "/detail": set_detail,
 }
 
 
